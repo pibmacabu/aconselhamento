@@ -7,7 +7,7 @@ import io
 from datetime import datetime, timedelta
 from functools import wraps
 
-from flask import Flask, request, jsonify, g, send_file
+from flask import Flask, request, jsonify, g, send_file, send_from_directory
 from flask_cors import CORS
 import bcrypt
 import jwt
@@ -20,7 +20,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 load_dotenv()
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='frontend', static_url_path='')
 CORS(app)
 
 # ======= CONFIGURAÇÕES =======
@@ -33,10 +33,14 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['BACKUP_FOLDER'], exist_ok=True)
 
-PORT = int(os.getenv('PORT', 5000))
-DATABASE = './database/aconselhamento.db'
-os.makedirs(os.path.dirname(DATABASE), exist_ok=True)   # <--- ESSENCIAL PARA O RENDER
+# Definição do banco de dados (persistente no Render se /data existir)
+if os.path.exists('/data'):
+    DATABASE = '/data/aconselhamento.db'
+else:
+    DATABASE = './database/aconselhamento.db'
+os.makedirs(os.path.dirname(DATABASE), exist_ok=True)
 
+PORT = int(os.getenv('PORT', 5000))
 ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'gif', 'doc', 'docx', 'txt'}
 
 # ======= BANCO DE DADOS =======
@@ -179,6 +183,15 @@ def init_db():
         db.commit()
 
 init_db()
+
+# ======= SERVE FRONTEND =======
+@app.route('/')
+def serve_index():
+    return send_file('frontend/index.html')
+
+@app.route('/<path:path>')
+def serve_static(path):
+    return send_from_directory('frontend', path)
 
 # ======= BACKUP AUTOMÁTICO =======
 def fazer_backup():
