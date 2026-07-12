@@ -1,8 +1,8 @@
 import sqlite3
 import json
 import os
-import shutil
 import secrets
+import shutil
 import io
 from datetime import datetime, timedelta
 from functools import wraps
@@ -15,8 +15,6 @@ from dotenv import load_dotenv
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from werkzeug.utils import secure_filename
-
-# APScheduler para backup automático
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -30,7 +28,7 @@ app.config['UPLOAD_FOLDER'] = './uploads'
 app.config['BACKUP_FOLDER'] = './backups'
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['BACKUP_FOLDER'], exist_ok=True)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
 PORT = int(os.getenv('PORT', 5000))
 DATABASE = './database/aconselhamento.db'
@@ -51,7 +49,6 @@ def close_connection(exception):
         db.close()
 
 def init_db():
-    """Cria tabelas e adiciona colunas necessárias (migração)."""
     with app.app_context():
         db = get_db()
         cursor = db.cursor()
@@ -64,7 +61,6 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
-
             CREATE TABLE IF NOT EXISTS pessoas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 conselheiro_id INTEGER NOT NULL,
@@ -74,7 +70,6 @@ def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE
             );
-
             CREATE TABLE IF NOT EXISTS casais (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 conselheiro_id INTEGER NOT NULL,
@@ -87,7 +82,6 @@ def init_db():
                 FOREIGN KEY (id_homem) REFERENCES pessoas(id) ON DELETE CASCADE,
                 FOREIGN KEY (id_mulher) REFERENCES pessoas(id) ON DELETE CASCADE
             );
-
             CREATE TABLE IF NOT EXISTS sessoes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 conselheiro_id INTEGER NOT NULL,
@@ -109,7 +103,6 @@ def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE
             );
-
             CREATE TABLE IF NOT EXISTS anexos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sessao_id INTEGER NOT NULL,
@@ -121,7 +114,6 @@ def init_db():
                 FOREIGN KEY (sessao_id) REFERENCES sessoes(id) ON DELETE CASCADE,
                 FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE
             );
-
             CREATE TABLE IF NOT EXISTS lembretes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 conselheiro_id INTEGER NOT NULL,
@@ -135,7 +127,6 @@ def init_db():
                 FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE,
                 FOREIGN KEY (sessao_id) REFERENCES sessoes(id) ON DELETE CASCADE
             );
-
             CREATE TABLE IF NOT EXISTS logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 conselheiro_id INTEGER NOT NULL,
@@ -144,43 +135,37 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE
             );
-
             CREATE TABLE IF NOT EXISTS tokens_blacklist (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 token TEXT NOT NULL,
                 expira_em TIMESTAMP NOT NULL
             );
-
             CREATE TABLE IF NOT EXISTS configuracoes (
                 chave TEXT PRIMARY KEY,
                 valor TEXT NOT NULL,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         ''')
-
-        # Migrações
-        colunas_existentes = [row['name'] for row in cursor.execute("PRAGMA table_info(sessoes)")]
-        if 'status' not in colunas_existentes:
+        colunas = [row['name'] for row in cursor.execute("PRAGMA table_info(sessoes)")]
+        if 'status' not in colunas:
             cursor.execute("ALTER TABLE sessoes ADD COLUMN status TEXT DEFAULT 'realizada'")
-        if 'tarefas_anteriores' not in colunas_existentes:
+        if 'tarefas_anteriores' not in colunas:
             cursor.execute("ALTER TABLE sessoes ADD COLUMN tarefas_anteriores TEXT")
-        if 'created_at' not in colunas_existentes:
+        if 'created_at' not in colunas:
             cursor.execute("ALTER TABLE sessoes ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        if 'updated_at' not in colunas_existentes:
+        if 'updated_at' not in colunas:
             cursor.execute("ALTER TABLE sessoes ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
 
-        colunas_lembretes = [row['name'] for row in cursor.execute("PRAGMA table_info(lembretes)")]
-        if 'sessao_id' not in colunas_lembretes:
+        colunas_lem = [row['name'] for row in cursor.execute("PRAGMA table_info(lembretes)")]
+        if 'sessao_id' not in colunas_lem:
             cursor.execute("ALTER TABLE lembretes ADD COLUMN sessao_id INTEGER REFERENCES sessoes(id) ON DELETE CASCADE")
 
-        # Configurações padrão
         cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('cor_primaria', '#b58b4b')")
         cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('cor_secundaria', '#2d6a4f')")
         cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('cor_fundo', '#f5f1eb')")
         cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('cor_texto', '#2e2b28')")
         cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('logo_url', '')")
         cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('nome_igreja', 'Igreja Batista')")
-
         db.commit()
 
 init_db()
@@ -203,7 +188,7 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(fazer_backup, trigger=IntervalTrigger(days=1), next_run_time=datetime.now() + timedelta(hours=1))
 scheduler.start()
 
-# -------- UTILITÁRIOS DE AUTENTICAÇÃO --------
+# -------- AUTENTICAÇÃO --------
 def gerar_token(conselheiro_id, refresh=False):
     exp = datetime.utcnow() + (timedelta(days=7) if refresh else timedelta(hours=1))
     payload = {'id': conselheiro_id, 'refresh': refresh, 'exp': exp}
@@ -330,17 +315,7 @@ def logout():
     log_acao(request.user_id, 'logout', 'Logout realizado')
     return jsonify({'mensagem': 'Deslogado com sucesso'})
 
-# -------- ROTAS PROTEGIDAS --------
-@app.route('/api/conselheiro', methods=['GET'])
-@autenticar_token
-def obter_conselheiro():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT id, nome, obs FROM conselheiros WHERE id = ?', (request.user_id,))
-    row = cursor.fetchone()
-    return jsonify(dict(row)) if row else ('', 404)
-
-# ---------- CONFIGURAÇÕES ----------
+# -------- CONFIGURAÇÕES --------
 @app.route('/api/configuracoes', methods=['GET'])
 @autenticar_token
 def get_configuracoes():
@@ -363,7 +338,7 @@ def update_configuracoes():
     log_acao(request.user_id, 'atualizar_configuracoes', 'Configurações atualizadas')
     return jsonify({'mensagem': 'Configurações salvas'})
 
-# ---------- PESSOAS ----------
+# -------- PESSOAS --------
 @app.route('/api/pessoas', methods=['GET'])
 @autenticar_token
 def listar_pessoas():
@@ -396,11 +371,9 @@ def deletar_pessoa(id):
     cursor = db.cursor()
     cursor.execute('DELETE FROM pessoas WHERE id = ? AND conselheiro_id = ?', (id, request.user_id))
     db.commit()
-    if cursor.rowcount:
-        log_acao(request.user_id, 'deletar_pessoa', f'Pessoa ID {id} removida')
     return jsonify({'deletado': cursor.rowcount})
 
-# ---------- CASAIS ----------
+# -------- CASAIS --------
 @app.route('/api/casais', methods=['GET'])
 @autenticar_token
 def listar_casais():
@@ -434,11 +407,9 @@ def deletar_casal(id):
     cursor = db.cursor()
     cursor.execute('DELETE FROM casais WHERE id = ? AND conselheiro_id = ?', (id, request.user_id))
     db.commit()
-    if cursor.rowcount:
-        log_acao(request.user_id, 'deletar_casal', f'Casal ID {id} removido')
     return jsonify({'deletado': cursor.rowcount})
 
-# ---------- SESSÕES ----------
+# -------- SESSÕES --------
 @app.route('/api/sessoes', methods=['GET'])
 @autenticar_token
 def listar_sessoes():
@@ -499,7 +470,6 @@ def listar_sessoes():
         count_params.append(f'%{assunto}%')
     cursor.execute(count_query, count_params)
     total = cursor.fetchone()['total']
-
     return jsonify({
         'items': resultado,
         'total': total,
@@ -557,7 +527,6 @@ def criar_sessao():
                     })
 
     tarefas_anteriores_json = json.dumps(tarefas_anteriores)
-
     cursor.execute('''
         INSERT INTO sessoes (
             conselheiro_id, data, caso_num, sessao_num, duracao,
@@ -631,11 +600,9 @@ def deletar_sessao(id):
     cursor = db.cursor()
     cursor.execute('DELETE FROM sessoes WHERE id = ? AND conselheiro_id = ?', (id, request.user_id))
     db.commit()
-    if cursor.rowcount:
-        log_acao(request.user_id, 'deletar_sessao', f'Sessão {id} removida')
     return jsonify({'deletado': cursor.rowcount})
 
-# ---------- ROTA PARA BUSCAR TAREFAS PENDENTES DA ÚLTIMA SESSÃO ----------
+# -------- ÚLTIMA SESSÃO (tarefas pendentes) --------
 @app.route('/api/ultima_sessao', methods=['GET'])
 @autenticar_token
 def ultima_sessao():
@@ -674,7 +641,7 @@ def ultima_sessao():
             })
     return jsonify({'tarefas': pendentes})
 
-# ---------- AVALIAR TAREFA ANTERIOR ----------
+# -------- AVALIAR TAREFA ANTERIOR --------
 @app.route('/api/avaliar_tarefa_anterior', methods=['POST'])
 @autenticar_token
 def avaliar_tarefa_anterior():
@@ -703,7 +670,7 @@ def avaliar_tarefa_anterior():
     log_acao(request.user_id, 'avaliar_tarefa', f'Tarefa {indice} da sessão {sessao_origem_id} avaliada')
     return jsonify({'mensagem': 'Avaliação salva'})
 
-# ---------- ANEXOS ----------
+# -------- ANEXOS --------
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -774,7 +741,7 @@ def download_anexo(anexo_id):
         return jsonify({'erro': 'Anexo não encontrado'}), 404
     return send_file(row['caminho'], download_name=row['nome_original'])
 
-# ---------- LEMBRETES ----------
+# -------- LEMBRETES --------
 @app.route('/api/lembretes', methods=['GET'])
 @autenticar_token
 def listar_lembretes():
@@ -820,8 +787,6 @@ def atualizar_lembrete(id):
         (concluido, id, request.user_id)
     )
     db.commit()
-    if cursor.rowcount == 0:
-        return jsonify({'erro': 'Lembrete não encontrado'}), 404
     return jsonify({'atualizado': cursor.rowcount})
 
 @app.route('/api/lembretes/<int:id>', methods=['DELETE'])
@@ -833,7 +798,7 @@ def deletar_lembrete(id):
     db.commit()
     return jsonify({'deletado': cursor.rowcount})
 
-# ---------- ESTATÍSTICAS ----------
+# -------- ESTATÍSTICAS --------
 @app.route('/api/estatisticas', methods=['GET'])
 @autenticar_token
 def estatisticas():
@@ -860,7 +825,6 @@ def estatisticas():
         ORDER BY mes
     ''', (request.user_id,))
     sessoes_por_mes = [{'mes': row['mes'], 'total': row['total']} for row in cursor.fetchall()]
-
     return jsonify({
         'total_sessoes': total_sessoes,
         'total_pessoas': total_pessoas,
@@ -870,7 +834,7 @@ def estatisticas():
         'sessoes_por_mes': sessoes_por_mes
     })
 
-# ---------- RELATÓRIOS ----------
+# -------- RELATÓRIOS --------
 @app.route('/api/relatorios/tarefas-pendentes', methods=['GET'])
 @autenticar_token
 def relatorio_tarefas_pendentes():
@@ -940,7 +904,7 @@ def relatorio_pessoas_atendidas():
     rows = cursor.fetchall()
     return jsonify([dict(row) for row in rows])
 
-# ---------- EXPORTAÇÃO EXCEL ----------
+# -------- EXPORTAÇÃO EXCEL --------
 @app.route('/api/exportar/excel', methods=['GET'])
 @autenticar_token
 def exportar_excel():
@@ -1008,13 +972,13 @@ def exportar_excel():
     output.seek(0)
     return send_file(output, download_name='sessoes.xlsx', as_attachment=True, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
-# ---------- BACKUP (manual) ----------
+# -------- BACKUP MANUAL --------
 @app.route('/api/backup', methods=['GET'])
 @autenticar_token
 def baixar_backup():
     return send_file(DATABASE, as_attachment=True, download_name=f'backup_{datetime.now().strftime("%Y%m%d")}.db')
 
-# ---------- LOGS ----------
+# -------- LOGS --------
 @app.route('/api/logs', methods=['GET'])
 @autenticar_token
 def listar_logs():
@@ -1024,10 +988,10 @@ def listar_logs():
     rows = cursor.fetchall()
     return jsonify([dict(row) for row in rows])
 
-# ---------- PING ----------
+# -------- PING --------
 @app.route('/api/ping', methods=['GET'])
 def ping():
     return jsonify({'status': 'ok', 'timestamp': datetime.utcnow().isoformat()})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=PORT, debug=True)
+    app.run(host='0.0.0.0', port=PORT, debug=False)
