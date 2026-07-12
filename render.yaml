@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: aconselhamento-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: PORT
+        value: 5000
+    plan: free
