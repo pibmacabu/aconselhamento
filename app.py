@@ -23,18 +23,23 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
+# ======= CONFIGURAÇÕES =======
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'segredo_super_seguro_aconselhamento')
 app.config['UPLOAD_FOLDER'] = './uploads'
 app.config['BACKUP_FOLDER'] = './backups'
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
+
+# Criar pastas necessárias
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['BACKUP_FOLDER'], exist_ok=True)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
 PORT = int(os.getenv('PORT', 5000))
 DATABASE = './database/aconselhamento.db'
+os.makedirs(os.path.dirname(DATABASE), exist_ok=True)   # <--- ESSENCIAL PARA O RENDER
+
 ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'gif', 'doc', 'docx', 'txt'}
 
-# -------- BANCO DE DADOS --------
+# ======= BANCO DE DADOS =======
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
@@ -49,6 +54,7 @@ def close_connection(exception):
         db.close()
 
 def init_db():
+    """Cria tabelas e adiciona colunas necessárias (migração)."""
     with app.app_context():
         db = get_db()
         cursor = db.cursor()
@@ -146,31 +152,35 @@ def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         ''')
-        colunas = [row['name'] for row in cursor.execute("PRAGMA table_info(sessoes)")]
-        if 'status' not in colunas:
+        # Migrações para tabela sessoes
+        colunas_sessoes = [row['name'] for row in cursor.execute("PRAGMA table_info(sessoes)")]
+        if 'status' not in colunas_sessoes:
             cursor.execute("ALTER TABLE sessoes ADD COLUMN status TEXT DEFAULT 'realizada'")
-        if 'tarefas_anteriores' not in colunas:
+        if 'tarefas_anteriores' not in colunas_sessoes:
             cursor.execute("ALTER TABLE sessoes ADD COLUMN tarefas_anteriores TEXT")
-        if 'created_at' not in colunas:
+        if 'created_at' not in colunas_sessoes:
             cursor.execute("ALTER TABLE sessoes ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        if 'updated_at' not in colunas:
+        if 'updated_at' not in colunas_sessoes:
             cursor.execute("ALTER TABLE sessoes ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
 
-        colunas_lem = [row['name'] for row in cursor.execute("PRAGMA table_info(lembretes)")]
-        if 'sessao_id' not in colunas_lem:
+        # Migrações para lembretes
+        colunas_lembretes = [row['name'] for row in cursor.execute("PRAGMA table_info(lembretes)")]
+        if 'sessao_id' not in colunas_lembretes:
             cursor.execute("ALTER TABLE lembretes ADD COLUMN sessao_id INTEGER REFERENCES sessoes(id) ON DELETE CASCADE")
 
+        # Configurações padrão
         cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('cor_primaria', '#b58b4b')")
         cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('cor_secundaria', '#2d6a4f')")
         cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('cor_fundo', '#f5f1eb')")
         cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('cor_texto', '#2e2b28')")
         cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('logo_url', '')")
         cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('nome_igreja', 'Igreja Batista')")
+
         db.commit()
 
 init_db()
 
-# -------- BACKUP AUTOMÁTICO --------
+# ======= BACKUP AUTOMÁTICO =======
 def fazer_backup():
     if not os.path.exists(DATABASE):
         return
@@ -188,7 +198,7 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(fazer_backup, trigger=IntervalTrigger(days=1), next_run_time=datetime.now() + timedelta(hours=1))
 scheduler.start()
 
-# -------- AUTENTICAÇÃO --------
+# ======= AUTENTICAÇÃO =======
 def gerar_token(conselheiro_id, refresh=False):
     exp = datetime.utcnow() + (timedelta(days=7) if refresh else timedelta(hours=1))
     payload = {'id': conselheiro_id, 'refresh': refresh, 'exp': exp}
@@ -233,7 +243,7 @@ def obter_proximo_sessao_num(conselheiro_id, caso_num):
     row = cursor.fetchone()
     return (row['max_num'] or 0) + 1
 
-# -------- ROTAS PÚBLICAS --------
+# ======= ROTAS PÚBLICAS =======
 @app.route('/api/registrar', methods=['POST'])
 def registrar():
     data = request.json
@@ -278,7 +288,11 @@ def login():
     return jsonify({
         'token': token,
         'refresh': refresh,
-        'conselheiro': {'id': conselheiro['id'], 'nome': conselheiro['nome'], 'obs': conselheiro['obs']}
+        'conselheiro': {
+            'id': conselheiro['id'],
+            'nome': conselheiro['nome'],
+            'obs': conselheiro['obs']
+        }
     })
 
 @app.route('/api/refresh', methods=['POST'])
@@ -315,7 +329,7 @@ def logout():
     log_acao(request.user_id, 'logout', 'Logout realizado')
     return jsonify({'mensagem': 'Deslogado com sucesso'})
 
-# -------- CONFIGURAÇÕES --------
+# ======= CONFIGURAÇÕES (CORES E BRANDING) =======
 @app.route('/api/configuracoes', methods=['GET'])
 @autenticar_token
 def get_configuracoes():
@@ -338,7 +352,7 @@ def update_configuracoes():
     log_acao(request.user_id, 'atualizar_configuracoes', 'Configurações atualizadas')
     return jsonify({'mensagem': 'Configurações salvas'})
 
-# -------- PESSOAS --------
+# ======= PESSOAS =======
 @app.route('/api/pessoas', methods=['GET'])
 @autenticar_token
 def listar_pessoas():
@@ -373,7 +387,7 @@ def deletar_pessoa(id):
     db.commit()
     return jsonify({'deletado': cursor.rowcount})
 
-# -------- CASAIS --------
+# ======= CASAIS =======
 @app.route('/api/casais', methods=['GET'])
 @autenticar_token
 def listar_casais():
@@ -409,7 +423,7 @@ def deletar_casal(id):
     db.commit()
     return jsonify({'deletado': cursor.rowcount})
 
-# -------- SESSÕES --------
+# ======= SESSÕES =======
 @app.route('/api/sessoes', methods=['GET'])
 @autenticar_token
 def listar_sessoes():
@@ -470,6 +484,7 @@ def listar_sessoes():
         count_params.append(f'%{assunto}%')
     cursor.execute(count_query, count_params)
     total = cursor.fetchone()['total']
+
     return jsonify({
         'items': resultado,
         'total': total,
@@ -602,7 +617,7 @@ def deletar_sessao(id):
     db.commit()
     return jsonify({'deletado': cursor.rowcount})
 
-# -------- ÚLTIMA SESSÃO (tarefas pendentes) --------
+# ======= ÚLTIMA SESSÃO (tarefas pendentes) =======
 @app.route('/api/ultima_sessao', methods=['GET'])
 @autenticar_token
 def ultima_sessao():
@@ -641,7 +656,7 @@ def ultima_sessao():
             })
     return jsonify({'tarefas': pendentes})
 
-# -------- AVALIAR TAREFA ANTERIOR --------
+# ======= AVALIAR TAREFA ANTERIOR =======
 @app.route('/api/avaliar_tarefa_anterior', methods=['POST'])
 @autenticar_token
 def avaliar_tarefa_anterior():
@@ -670,7 +685,7 @@ def avaliar_tarefa_anterior():
     log_acao(request.user_id, 'avaliar_tarefa', f'Tarefa {indice} da sessão {sessao_origem_id} avaliada')
     return jsonify({'mensagem': 'Avaliação salva'})
 
-# -------- ANEXOS --------
+# ======= ANEXOS =======
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -741,7 +756,7 @@ def download_anexo(anexo_id):
         return jsonify({'erro': 'Anexo não encontrado'}), 404
     return send_file(row['caminho'], download_name=row['nome_original'])
 
-# -------- LEMBRETES --------
+# ======= LEMBRETES =======
 @app.route('/api/lembretes', methods=['GET'])
 @autenticar_token
 def listar_lembretes():
@@ -798,7 +813,7 @@ def deletar_lembrete(id):
     db.commit()
     return jsonify({'deletado': cursor.rowcount})
 
-# -------- ESTATÍSTICAS --------
+# ======= ESTATÍSTICAS =======
 @app.route('/api/estatisticas', methods=['GET'])
 @autenticar_token
 def estatisticas():
@@ -834,7 +849,7 @@ def estatisticas():
         'sessoes_por_mes': sessoes_por_mes
     })
 
-# -------- RELATÓRIOS --------
+# ======= RELATÓRIOS =======
 @app.route('/api/relatorios/tarefas-pendentes', methods=['GET'])
 @autenticar_token
 def relatorio_tarefas_pendentes():
@@ -904,7 +919,7 @@ def relatorio_pessoas_atendidas():
     rows = cursor.fetchall()
     return jsonify([dict(row) for row in rows])
 
-# -------- EXPORTAÇÃO EXCEL --------
+# ======= EXPORTAÇÃO EXCEL =======
 @app.route('/api/exportar/excel', methods=['GET'])
 @autenticar_token
 def exportar_excel():
@@ -972,13 +987,13 @@ def exportar_excel():
     output.seek(0)
     return send_file(output, download_name='sessoes.xlsx', as_attachment=True, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
-# -------- BACKUP MANUAL --------
+# ======= BACKUP MANUAL =======
 @app.route('/api/backup', methods=['GET'])
 @autenticar_token
 def baixar_backup():
     return send_file(DATABASE, as_attachment=True, download_name=f'backup_{datetime.now().strftime("%Y%m%d")}.db')
 
-# -------- LOGS --------
+# ======= LOGS =======
 @app.route('/api/logs', methods=['GET'])
 @autenticar_token
 def listar_logs():
@@ -988,7 +1003,7 @@ def listar_logs():
     rows = cursor.fetchall()
     return jsonify([dict(row) for row in rows])
 
-# -------- PING --------
+# ======= PING =======
 @app.route('/api/ping', methods=['GET'])
 def ping():
     return jsonify({'status': 'ok', 'timestamp': datetime.utcnow().isoformat()})
