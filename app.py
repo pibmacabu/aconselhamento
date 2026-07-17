@@ -5,10 +5,10 @@ import io
 import json
 from datetime import datetime, timedelta
 from functools import wraps
-from flask import Flask, request, jsonify, g, send_file, send_from_directory
+from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import func, or_
+from sqlalchemy import func, extract
 import bcrypt
 import jwt
 from dotenv import load_dotenv
@@ -27,35 +27,32 @@ CORS(app)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'segredo_super_seguro_aconselhamento')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
 
-# Configuração do banco de dados PostgreSQL (via DATABASE_URL)
+# Banco de dados (PostgreSQL ou SQLite fallback)
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
 if app.config['SQLALCHEMY_DATABASE_URI'] and app.config['SQLALCHEMY_DATABASE_URI'].startswith('postgres://'):
-    # Render fornece 'postgres://', mas SQLAlchemy exige 'postgresql://'
     app.config['SQLALCHEMY_DATABASE_URI'] = app.config['SQLALCHEMY_DATABASE_URI'].replace('postgres://', 'postgresql://', 1)
 
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-# Para compatibilidade com SQLite local (fallback)
 if not app.config['SQLALCHEMY_DATABASE_URI']:
-    # Se não houver DATABASE_URL, usar SQLite local (para desenvolvimento)
     DATABASE_PATH = './database/aconselhamento.db'
     os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
     app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{DATABASE_PATH}'
 
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
-# Pastas para uploads e backups (persistência local – no Render free, serão efêmeras)
+# Pastas para uploads
 UPLOAD_FOLDER = './uploads'
-BACKUP_FOLDER = './backups'
+LOGO_FOLDER = os.path.join(UPLOAD_FOLDER, 'logos')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(BACKUP_FOLDER, exist_ok=True)
+os.makedirs(LOGO_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['BACKUP_FOLDER'] = BACKUP_FOLDER
+app.config['LOGO_FOLDER'] = LOGO_FOLDER
 
 PORT = int(os.getenv('PORT', 5000))
 ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'gif', 'doc', 'docx', 'txt'}
+ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 
-# ===== MODELOS (TABELAS) =====
+# ===== MODELOS =====
 class Conselheiro(db.Model):
     __tablename__ = 'conselheiros'
     id = db.Column(db.Integer, primary_key=True)
@@ -81,10 +78,6 @@ class Pessoa(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relacionamentos
-    casais_homem = db.relationship('Casal', foreign_keys='Casal.id_homem', backref='homem', lazy=True, cascade='all, delete-orphan')
-    casais_mulher = db.relationship('Casal', foreign_keys='Casal.id_mulher', backref='mulher', lazy=True, cascade='all, delete-orphan')
-
 class Casal(db.Model):
     __tablename__ = 'casais'
     id = db.Column(db.Integer, primary_key=True)
@@ -99,19 +92,19 @@ class Sessao(db.Model):
     __tablename__ = 'sessoes'
     id = db.Column(db.Integer, primary_key=True)
     conselheiro_id = db.Column(db.Integer, db.ForeignKey('conselheiros.id', ondelete='CASCADE'), nullable=False)
-    data = db.Column(db.String(20), nullable=False)  # formato YYYY-MM-DD
+    data = db.Column(db.String(20), nullable=False)
     caso_num = db.Column(db.String(20), nullable=False)
     sessao_num = db.Column(db.Integer, nullable=False)
     duracao = db.Column(db.String(20))
-    is_casal = db.Column(db.Integer, nullable=False, default=0)  # 0 ou 1
+    is_casal = db.Column(db.Integer, nullable=False, default=0)
     id_pessoa = db.Column(db.Integer, db.ForeignKey('pessoas.id', ondelete='SET NULL'))
     id_casal = db.Column(db.Integer, db.ForeignKey('casais.id', ondelete='SET NULL'))
     versiculo = db.Column(db.String(200))
     anotacao_sessao = db.Column(db.Text)
-    tasks = db.Column(db.Text)  # JSON
-    tarefas_anteriores = db.Column(db.Text)  # JSON
-    assuntos_nesta = db.Column(db.Text)  # JSON
-    assuntos_proximas = db.Column(db.Text)  # JSON
+    tasks = db.Column(db.Text)
+    tarefas_anteriores = db.Column(db.Text)
+    assuntos_nesta = db.Column(db.Text)
+    assuntos_proximas = db.Column(db.Text)
     status = db.Column(db.String(20), default='realizada')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -133,7 +126,7 @@ class Lembrete(db.Model):
     sessao_id = db.Column(db.Integer, db.ForeignKey('sessoes.id', ondelete='CASCADE'))
     titulo = db.Column(db.String(100), nullable=False)
     descricao = db.Column(db.Text)
-    data_lembrete = db.Column(db.String(20), nullable=False)  # YYYY-MM-DD
+    data_lembrete = db.Column(db.String(20), nullable=False)
     concluido = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -158,12 +151,9 @@ class Configuracao(db.Model):
     valor = db.Column(db.String(200), nullable=False)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-# ===== CRIAÇÃO DAS TABELAS E MIGRAÇÕES =====
+# ===== CRIAÇÃO DAS TABELAS =====
 with app.app_context():
     db.create_all()
-    # Verificar e adicionar colunas extras que podem não existir (para compatibilidade com migrações)
-    # Como estamos usando SQLAlchemy, as colunas já estão definidas nos modelos.
-    # Adicionar configurações padrão se não existirem
     configs_padrao = {
         'cor_primaria': '#b58b4b',
         'cor_secundaria': '#2d6a4f',
@@ -186,13 +176,6 @@ def serve_index():
 def serve_static(path):
     return send_from_directory('frontend', path)
 
-# ===== BACKUP AUTOMÁTICO (não usa banco, apenas arquivo) =====
-def fazer_backup():
-    # Como agora usamos PostgreSQL, o backup do arquivo .db não é mais relevante.
-    # Podemos manter para compatibilidade ou remover. Vou manter apenas como exemplo.
-    # Na prática, o banco é gerenciado pelo Render.
-    pass
-
 # ===== AUTENTICAÇÃO =====
 def gerar_token(conselheiro_id, refresh=False):
     exp = datetime.utcnow() + (timedelta(days=7) if refresh else timedelta(hours=1))
@@ -207,7 +190,6 @@ def autenticar_token(f):
             return jsonify({'erro': 'Token não fornecido'}), 401
         try:
             token = auth_header.split(' ')[1]
-            # Verificar blacklist
             if TokenBlacklist.query.filter_by(token=token).first():
                 return jsonify({'erro': 'Token revogado'}), 403
             payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
@@ -305,6 +287,69 @@ def logout():
     log_acao(request.user_id, 'logout', 'Logout realizado')
     return jsonify({'mensagem': 'Deslogado com sucesso'})
 
+# ===== ALTERAR SENHA =====
+@app.route('/api/alterar-senha', methods=['POST'])
+@autenticar_token
+def alterar_senha():
+    data = request.json
+    senha_atual = data.get('senha_atual')
+    nova_senha = data.get('nova_senha')
+    if not senha_atual or not nova_senha:
+        return jsonify({'erro': 'Senha atual e nova senha são obrigatórias'}), 400
+    conselheiro = Conselheiro.query.get(request.user_id)
+    if not conselheiro:
+        return jsonify({'erro': 'Usuário não encontrado'}), 404
+    if not bcrypt.checkpw(senha_atual.encode('utf-8'), conselheiro.senha_hash.encode('utf-8')):
+        return jsonify({'erro': 'Senha atual incorreta'}), 401
+    novo_hash = bcrypt.hashpw(nova_senha.encode('utf-8'), bcrypt.gensalt(12)).decode('utf-8')
+    conselheiro.senha_hash = novo_hash
+    db.session.commit()
+    log_acao(request.user_id, 'alterar_senha', 'Senha alterada')
+    return jsonify({'mensagem': 'Senha alterada com sucesso'})
+
+# ===== UPLOAD DO LOGO =====
+def allowed_image(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_IMAGE_EXTENSIONS
+
+@app.route('/api/upload-logo', methods=['POST'])
+@autenticar_token
+def upload_logo():
+    if 'logo' not in request.files:
+        return jsonify({'erro': 'Nenhum arquivo enviado'}), 400
+    file = request.files['logo']
+    if file.filename == '':
+        return jsonify({'erro': 'Nome de arquivo vazio'}), 400
+    if not allowed_image(file.filename):
+        return jsonify({'erro': 'Formato de imagem não permitido (use PNG, JPG, JPEG, GIF ou WEBP)'}), 400
+
+    # Gerar nome único
+    ext = file.filename.rsplit('.', 1)[1].lower()
+    nome_arquivo = f"logo_{secrets.token_hex(8)}.{ext}"
+    caminho = os.path.join(app.config['LOGO_FOLDER'], nome_arquivo)
+    file.save(caminho)
+
+    # URL pública (relativa)
+    logo_url = f"/uploads/logos/{nome_arquivo}"
+    # Atualizar configuração
+    config = Configuracao.query.get('logo_url')
+    if config:
+        # Remover logo antigo se existir
+        if config.valor and config.valor.startswith('/uploads/logos/'):
+            antigo = os.path.join(app.config['LOGO_FOLDER'], os.path.basename(config.valor))
+            if os.path.exists(antigo):
+                os.remove(antigo)
+        config.valor = logo_url
+    else:
+        db.session.add(Configuracao(chave='logo_url', valor=logo_url))
+    db.session.commit()
+    log_acao(request.user_id, 'upload_logo', f'Logo atualizado: {logo_url}')
+    return jsonify({'mensagem': 'Logo enviado com sucesso', 'logo_url': logo_url}), 201
+
+# Rota para servir arquivos de upload (logos e anexos)
+@app.route('/uploads/<path:filename>')
+def serve_upload(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename)
+
 # ===== CONFIGURAÇÕES =====
 @app.route('/api/configuracoes', methods=['GET'])
 @autenticar_token
@@ -331,9 +376,7 @@ def update_configuracoes():
 @autenticar_token
 def listar_pessoas():
     pessoas = Pessoa.query.filter_by(conselheiro_id=request.user_id).order_by(Pessoa.nome).all()
-    return jsonify([{'id': p.id, 'nome': p.nome, 'obs': p.obs, 'conselheiro_id': p.conselheiro_id,
-                     'created_at': p.created_at.isoformat() if p.created_at else None,
-                     'updated_at': p.updated_at.isoformat() if p.updated_at else None} for p in pessoas])
+    return jsonify([{'id': p.id, 'nome': p.nome, 'obs': p.obs} for p in pessoas])
 
 @app.route('/api/pessoas', methods=['POST'])
 @autenticar_token
@@ -364,9 +407,7 @@ def deletar_pessoa(id):
 @autenticar_token
 def listar_casais():
     casais = Casal.query.filter_by(conselheiro_id=request.user_id).order_by(Casal.nome_casal).all()
-    return jsonify([{'id': c.id, 'nome_casal': c.nome_casal, 'id_homem': c.id_homem, 'id_mulher': c.id_mulher,
-                     'conselheiro_id': c.conselheiro_id,
-                     'created_at': c.created_at.isoformat() if c.created_at else None} for c in casais])
+    return jsonify([{'id': c.id, 'nome_casal': c.nome_casal, 'id_homem': c.id_homem, 'id_mulher': c.id_mulher} for c in casais])
 
 @app.route('/api/casais', methods=['POST'])
 @autenticar_token
@@ -377,11 +418,10 @@ def criar_casal():
     id_mulher = data.get('id_mulher')
     if not id_homem or not id_mulher:
         return jsonify({'erro': 'Selecione marido e esposa'}), 400
-    # Verificar se as pessoas existem e pertencem ao conselheiro
-    homem = Pessoa.query.filter_by(id=id_homem, conselheiro_id=request.user_id).first()
-    mulher = Pessoa.query.filter_by(id=id_mulher, conselheiro_id=request.user_id).first()
-    if not homem or not mulher:
-        return jsonify({'erro': 'Pessoa não encontrada'}), 404
+    if not Pessoa.query.filter_by(id=id_homem, conselheiro_id=request.user_id).first():
+        return jsonify({'erro': 'Marido não encontrado'}), 404
+    if not Pessoa.query.filter_by(id=id_mulher, conselheiro_id=request.user_id).first():
+        return jsonify({'erro': 'Esposa não encontrada'}), 404
     casal = Casal(conselheiro_id=request.user_id, nome_casal=nome_casal, id_homem=id_homem, id_mulher=id_mulher)
     db.session.add(casal)
     db.session.commit()
@@ -426,7 +466,6 @@ def listar_sessoes():
     for s in rows:
         d = {
             'id': s.id,
-            'conselheiro_id': s.conselheiro_id,
             'data': s.data,
             'caso_num': s.caso_num,
             'sessao_num': s.sessao_num,
@@ -440,9 +479,7 @@ def listar_sessoes():
             'tarefas_anteriores': json.loads(s.tarefas_anteriores) if s.tarefas_anteriores else [],
             'assuntosNestaSessao': json.loads(s.assuntos_nesta) if s.assuntos_nesta else [],
             'assuntosProximasSessoes': json.loads(s.assuntos_proximas) if s.assuntos_proximas else [],
-            'status': s.status,
-            'created_at': s.created_at.isoformat() if s.created_at else None,
-            'updated_at': s.updated_at.isoformat() if s.updated_at else None
+            'status': s.status
         }
         resultado.append(d)
 
@@ -484,7 +521,6 @@ def criar_sessao():
     if 'tarefas_anteriores' in data and data['tarefas_anteriores']:
         tarefas_anteriores = data['tarefas_anteriores']
     else:
-        # Buscar última sessão do mesmo caso
         ultima = Sessao.query.filter_by(conselheiro_id=request.user_id, caso_num=caso_num).order_by(Sessao.sessao_num.desc()).first()
         if ultima:
             tasks_ant = json.loads(ultima.tasks) if ultima.tasks else []
@@ -570,7 +606,7 @@ def deletar_sessao(id):
     db.session.commit()
     return jsonify({'deletado': 1})
 
-# ===== ÚLTIMA SESSÃO (tarefas pendentes) =====
+# ===== ÚLTIMA SESSÃO =====
 @app.route('/api/ultima_sessao', methods=['GET'])
 @autenticar_token
 def ultima_sessao():
@@ -606,7 +642,6 @@ def avaliar_tarefa_anterior():
     sessao_origem_id = data.get('sessao_origem_id')
     indice = data.get('indice')
     avaliacao = data.get('avaliacao', '')
-
     if sessao_origem_id is None or indice is None:
         return jsonify({'erro': 'Parâmetros inválidos'}), 400
 
@@ -695,8 +730,7 @@ def listar_lembretes():
     lembretes = Lembrete.query.filter_by(conselheiro_id=request.user_id).order_by(Lembrete.data_lembrete).all()
     return jsonify([{'id': l.id, 'titulo': l.titulo, 'descricao': l.descricao,
                      'data_lembrete': l.data_lembrete, 'concluido': l.concluido,
-                     'sessao_id': l.sessao_id,
-                     'created_at': l.created_at.isoformat() if l.created_at else None} for l in lembretes])
+                     'sessao_id': l.sessao_id} for l in lembretes])
 
 @app.route('/api/lembretes', methods=['POST'])
 @autenticar_token
@@ -708,9 +742,8 @@ def criar_lembrete():
     sessao_id = data.get('sessao_id')
     if not titulo or not data_lembrete:
         return jsonify({'erro': 'Título e data são obrigatórios'}), 400
-    if sessao_id:
-        if not Sessao.query.filter_by(id=sessao_id, conselheiro_id=request.user_id).first():
-            return jsonify({'erro': 'Sessão não encontrada'}), 404
+    if sessao_id and not Sessao.query.filter_by(id=sessao_id, conselheiro_id=request.user_id).first():
+        return jsonify({'erro': 'Sessão não encontrada'}), 404
     lembrete = Lembrete(
         conselheiro_id=request.user_id,
         sessao_id=sessao_id,
@@ -746,16 +779,15 @@ def deletar_lembrete(id):
     db.session.commit()
     return jsonify({'deletado': 1})
 
-# ===== ESTATÍSTICAS =====
+# ===== ESTATÍSTICAS (CORRIGIDO) =====
 @app.route('/api/estatisticas', methods=['GET'])
 @autenticar_token
 def estatisticas():
     total_sessoes = Sessao.query.filter_by(conselheiro_id=request.user_id).count()
     total_pessoas = Pessoa.query.filter_by(conselheiro_id=request.user_id).count()
     total_casais = Casal.query.filter_by(conselheiro_id=request.user_id).count()
-    # Tarefas pendentes: contar tasks onde avaliação é vazia (usando JSON functions do PostgreSQL)
-    # Como é complexo com SQLAlchemy, podemos fazer uma query raw ou simplificar contando todas as tasks.
-    # Vamos calcular via Python (mais fácil)
+
+    # Tarefas pendentes (via Python)
     sessoes = Sessao.query.filter_by(conselheiro_id=request.user_id).all()
     tarefas_pendentes = 0
     for s in sessoes:
@@ -764,17 +796,26 @@ def estatisticas():
             for t in tasks:
                 if not t.get('avaliacao', '').strip():
                     tarefas_pendentes += 1
+
     lembretes_pendentes = Lembrete.query.filter_by(conselheiro_id=request.user_id, concluido=0).count()
 
-    # Sessões por mês (últimos 12 meses)
-    meses = db.session.query(
-        func.strftime('%Y-%m', Sessao.data).label('mes'),
+    # Sessões por mês (últimos 12 meses) – compatível com PostgreSQL e SQLite
+    # Usamos extração de ano e mês
+    from sqlalchemy import extract
+    # Pegamos todas as sessões do usuário
+    sessoes_mes = db.session.query(
+        func.extract('year', func.to_date(Sessao.data, 'YYYY-MM-DD')).label('ano'),
+        func.extract('month', func.to_date(Sessao.data, 'YYYY-MM-DD')).label('mes'),
         func.count().label('total')
     ).filter(
         Sessao.conselheiro_id == request.user_id,
         Sessao.data >= (datetime.utcnow() - timedelta(days=365)).strftime('%Y-%m-%d')
-    ).group_by('mes').order_by('mes').all()
-    sessoes_por_mes = [{'mes': m.mes, 'total': m.total} for m in meses]
+    ).group_by('ano', 'mes').order_by('ano', 'mes').all()
+
+    sessoes_por_mes = []
+    for m in sessoes_mes:
+        mes_str = f"{int(m.ano):04d}-{int(m.mes):02d}"
+        sessoes_por_mes.append({'mes': mes_str, 'total': m.total})
 
     return jsonify({
         'total_sessoes': total_sessoes,
@@ -837,7 +878,6 @@ def relatorio_sessoes_periodo():
 @app.route('/api/relatorios/pessoas-atendidas', methods=['GET'])
 @autenticar_token
 def relatorio_pessoas_atendidas():
-    # Pessoas que têm sessões
     pessoas = Pessoa.query.filter_by(conselheiro_id=request.user_id).all()
     resultado = []
     for p in pessoas:
@@ -848,7 +888,6 @@ def relatorio_pessoas_atendidas():
             'obs': p.obs,
             'total_sessoes': total_sessoes
         })
-    # Ordenar por total_sessoes decrescente
     resultado.sort(key=lambda x: x['total_sessoes'], reverse=True)
     return jsonify(resultado)
 
@@ -916,10 +955,9 @@ def exportar_excel():
 @app.route('/api/backup', methods=['GET'])
 @autenticar_token
 def baixar_backup():
-    # Com PostgreSQL, não temos um arquivo .db para baixar, mas podemos exportar dados.
-    # Vamos retornar um arquivo JSON com todas as tabelas (simplificado).
-    # Ou simplesmente retornamos uma mensagem informando que o backup é gerenciado pelo Render.
-    return jsonify({'mensagem': 'Backup via PostgreSQL é gerenciado pelo Render. Utilize a ferramenta de backup do Render.'}), 200
+    # No PostgreSQL, podemos exportar dados em JSON ou CSV.
+    # Por simplicidade, retornamos uma mensagem.
+    return jsonify({'mensagem': 'Backup via PostgreSQL gerenciado pelo Render. Use a ferramenta de backup do Render.'}), 200
 
 # ===== LOGS =====
 @app.route('/api/logs', methods=['GET'])
