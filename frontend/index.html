@@ -1,1019 +1,1624 @@
-import sqlite3
-import json
-import os
-import secrets
-import shutil
-import io
-from datetime import datetime, timedelta
-from functools import wraps
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Aconselhamento Bíblico</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..700&display=swap" rel="stylesheet" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style id="dynamic-styles">
+        /* Reset e variáveis */
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family:'Inter', sans-serif; background:var(--bg); color:var(--text); padding:1.5rem; transition:background 0.3s, color 0.3s; }
+        .container { max-width:1400px; margin:0 auto; }
+        :root {
+            --primary:#b58b4b;
+            --secondary:#2d6a4f;
+            --bg:#f5f1eb;
+            --text:#2e2b28;
+            --card:#ffffff;
+            --border:#e0d6cc;
+            --shadow:0 4px 12px rgba(0,0,0,0.05);
+        }
 
-from flask import Flask, request, jsonify, g, send_file, send_from_directory
-from flask_cors import CORS
-import bcrypt
-import jwt
-from dotenv import load_dotenv
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment
-from werkzeug.utils import secure_filename
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.interval import IntervalTrigger
+        /* Autenticação */
+        .auth-container {
+            background:var(--card);
+            max-width:480px;
+            margin:3rem auto;
+            padding:2.5rem;
+            border-radius:32px;
+            box-shadow:0 20px 40px rgba(0,0,0,0.08);
+            text-align:center;
+        }
+        .auth-container h2 { margin-bottom:0.5rem; }
+        .auth-container input {
+            width:100%;
+            padding:0.8rem 1.2rem;
+            margin-bottom:1rem;
+            border:1.5px solid var(--border);
+            border-radius:40px;
+            font-size:1rem;
+            background:var(--bg);
+            color:var(--text);
+        }
+        .auth-container input:focus {
+            outline:none;
+            border-color:var(--primary);
+            box-shadow:0 0 0 3px rgba(181,139,75,0.15);
+        }
+        .auth-container button {
+            margin:0.4rem;
+            padding:0.7rem 2rem;
+            border:none;
+            border-radius:40px;
+            font-weight:600;
+            cursor:pointer;
+            transition:0.2s;
+            background:#e8dfd5;
+            color:var(--text);
+        }
+        .auth-container button.primary { background:var(--primary); color:#fff; }
+        .auth-container button.primary:hover { filter:brightness(0.9); }
+        .auth-container button.secondary { background:transparent; color:var(--primary); text-decoration:underline; }
 
-load_dotenv()
+        /* Cabeçalho */
+        .app-header {
+            display:flex;
+            justify-content:space-between;
+            align-items:center;
+            flex-wrap:wrap;
+            margin-bottom:1.5rem;
+        }
+        .app-header h1 { font-weight:600; font-size:1.8rem; }
+        .app-header .user-info { display:flex; align-items:center; gap:1rem; }
+        .btn-logout {
+            background:#ecd9cf;
+            color:#a5532e;
+            padding:0.5rem 1.5rem;
+            border:none;
+            border-radius:40px;
+            font-weight:600;
+            cursor:pointer;
+            transition:0.2s;
+        }
+        .btn-logout:hover { background:#e0c4b5; }
 
-app = Flask(__name__, static_folder='frontend', static_url_path='')
-CORS(app)
+        /* Abas */
+        .tabs {
+            display:flex;
+            gap:0.3rem;
+            margin-bottom:1.5rem;
+            border-bottom:2px solid var(--border);
+            flex-wrap:wrap;
+        }
+        .tab-btn {
+            background:transparent;
+            border:none;
+            padding:0.7rem 1.4rem;
+            font-weight:600;
+            color:#6b5f55;
+            cursor:pointer;
+            border-radius:40px 40px 0 0;
+            transition:0.2s;
+            font-size:0.95rem;
+        }
+        .tab-btn.active {
+            background:var(--card);
+            color:var(--primary);
+            border-bottom:3px solid var(--primary);
+        }
+        .tab-content {
+            display:none;
+            background:var(--card);
+            border-radius:28px;
+            padding:1.8rem 2rem;
+            margin-bottom:2rem;
+            box-shadow:var(--shadow);
+            border:1px solid var(--border);
+        }
+        .tab-content.active { display:block; }
 
-# ===== CONFIGURAÇÕES =====
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'segredo_super_seguro_aconselhamento')
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
+        /* Cards e formulários */
+        .card-title {
+            font-size:1.4rem;
+            font-weight:600;
+            margin-bottom:1.5rem;
+            border-bottom:2px solid var(--border);
+            padding-bottom:0.6rem;
+        }
+        .form-grid {
+            display:grid;
+            grid-template-columns:repeat(auto-fill,minmax(260px,1fr));
+            gap:1.2rem;
+            margin-bottom:1.5rem;
+        }
+        .field-group {
+            display:flex;
+            flex-direction:column;
+            gap:0.3rem;
+        }
+        .field-group.full-width { grid-column:1/-1; }
+        label { font-weight:600; color:#5a4d42; font-size:0.85rem; letter-spacing:0.3px; }
+        input, select, textarea {
+            padding:0.7rem 1rem;
+            border:1.5px solid var(--border);
+            border-radius:20px;
+            font-size:0.95rem;
+            background:var(--bg);
+            color:var(--text);
+            transition:0.2s;
+            font-family:inherit;
+        }
+        input:focus, select:focus, textarea:focus {
+            outline:none;
+            border-color:var(--primary);
+            box-shadow:0 0 0 3px rgba(181,139,75,0.1);
+        }
+        textarea { resize:vertical; min-height:80px; }
+        button {
+            background:#e8dfd5;
+            border:none;
+            padding:0.6rem 1.4rem;
+            border-radius:40px;
+            font-weight:600;
+            cursor:pointer;
+            transition:0.2s;
+            font-family:inherit;
+            color:var(--text);
+        }
+        button.primary { background:var(--primary); color:#fff; }
+        button.primary:hover { filter:brightness(0.9); }
+        button.danger { background:#f5e0d8; color:#a5532e; }
+        button.danger:hover { background:#edd0c4; }
+        button.secondary { background:transparent; color:#6b5f55; border:1.5px solid var(--border); }
+        .btn-group { display:flex; gap:0.6rem; flex-wrap:wrap; margin-top:0.5rem; }
 
-# Persistência no Render: se existir /data, usamos ele para tudo
-DATA_DIR = '/data' if os.path.exists('/data') else '.'
-DATABASE = os.path.join(DATA_DIR, 'acompanhamento.db')
-UPLOAD_FOLDER = os.path.join(DATA_DIR, 'uploads')
-BACKUP_FOLDER = os.path.join(DATA_DIR, 'backups')
+        /* Listas e itens */
+        .lista-item {
+            background:var(--bg);
+            border-radius:20px;
+            padding:0.8rem 1.2rem;
+            margin-bottom:0.6rem;
+            display:flex;
+            justify-content:space-between;
+            align-items:center;
+            flex-wrap:wrap;
+        }
+        .lista-item:hover { background:#f3ede6; }
+        .empty-msg { color:#9a8a7a; text-align:center; padding:1.5rem; font-style:italic; }
 
-# Cria pastas necessárias
-os.makedirs(os.path.dirname(DATABASE) if os.path.dirname(DATABASE) else '.', exist_ok=True)
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(BACKUP_FOLDER, exist_ok=True)
+        /* Tarefas */
+        .task-item {
+            background:var(--bg);
+            border-radius:24px;
+            padding:0.8rem 1rem;
+            margin-bottom:0.7rem;
+            display:flex;
+            flex-wrap:wrap;
+            gap:0.8rem;
+            align-items:center;
+            border-left:5px solid var(--primary);
+        }
+        .task-item input { flex:1; min-width:120px; }
+        .topic-list { display:flex; flex-wrap:wrap; gap:0.6rem; margin:0.5rem 0; }
+        .topic-tag {
+            background:#e9e0d4;
+            border-radius:40px;
+            padding:0.3rem 0.9rem;
+            display:inline-flex;
+            gap:0.5rem;
+            font-size:0.85rem;
+            align-items:center;
+        }
+        .topic-tag button { background:transparent; padding:0 0.3rem; font-size:0.8rem; color:#8a7a6a; cursor:pointer; }
 
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['BACKUP_FOLDER'] = BACKUP_FOLDER
+        /* Tarefas anteriores */
+        .tarefa-anterior {
+            background:#f0f7f0;
+            border-left:4px solid var(--secondary);
+            padding:0.6rem 1rem;
+            border-radius:12px;
+            margin-bottom:0.5rem;
+            display:flex;
+            flex-wrap:wrap;
+            align-items:center;
+            gap:0.8rem;
+        }
+        .tarefa-anterior .desc { flex:1; min-width:120px; }
+        .tarefa-anterior input { flex:1; min-width:120px; border-radius:20px; padding:0.4rem 0.8rem; border:1.5px solid var(--border); background:var(--bg); }
+        .tarefa-anterior .btn-salvar-avaliacao { font-size:0.8rem; padding:0.2rem 0.8rem; background:var(--secondary); color:#fff; border:none; border-radius:40px; cursor:pointer; }
+        .tarefa-anterior .btn-salvar-avaliacao:hover { filter:brightness(0.9); }
+        .tarefa-anterior .status-avaliado { color:var(--secondary); font-weight:600; font-size:0.8rem; }
 
-PORT = int(os.getenv('PORT', 5000))
-ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'gif', 'doc', 'docx', 'txt'}
+        /* Dashboard */
+        .dashboard-stats {
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+            gap:1rem;
+            margin-bottom:2rem;
+        }
+        .stat-card {
+            background:var(--bg);
+            border-radius:20px;
+            padding:1.2rem 1rem;
+            text-align:center;
+            border:1px solid var(--border);
+        }
+        .stat-card .number { font-size:2rem; font-weight:700; }
+        .stat-card .label { font-size:0.85rem; color:#6b5f55; margin-top:0.2rem; }
+        .chart-container { background:var(--bg); border-radius:20px; padding:1.5rem; border:1px solid var(--border); margin-bottom:1.5rem; }
+        .chart-container canvas { max-height:280px; max-width:100%; }
 
-# ===== BANCO DE DADOS =====
-def get_db():
-    db = getattr(g, '_database', None)
-    if db is None:
-        db = g._database = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row
-    return db
+        /* Itens de consulta */
+        .record-item {
+            background:var(--bg);
+            border-radius:24px;
+            padding:1.2rem;
+            border:1px solid var(--border);
+            margin-bottom:1rem;
+        }
+        .record-item:hover { background:#faf5ee; }
+        .record-item .record-header {
+            display:flex;
+            flex-wrap:wrap;
+            justify-content:space-between;
+            align-items:flex-start;
+            gap:0.5rem;
+        }
+        .record-item .record-header strong { font-size:1.05rem; }
+        .record-item .record-header .badge {
+            display:inline-block;
+            background:#e8dfd5;
+            padding:0.2rem 0.8rem;
+            border-radius:40px;
+            font-size:0.75rem;
+            font-weight:600;
+            color:#4d4238;
+        }
+        .record-item .record-body { margin-top:0.5rem; font-size:0.95rem; color:#4d4238; }
+        .record-item .record-body .tasks-preview,
+        .record-item .record-body .assuntos-preview {
+            margin-top:0.4rem;
+            padding-left:0.8rem;
+            border-left:3px solid var(--primary);
+            font-size:0.9rem;
+        }
+        .record-item .record-body .assuntos-preview { border-left-color:#8faa7b; }
+        .record-item .record-actions { margin-top:0.8rem; display:flex; flex-wrap:wrap; gap:0.5rem; }
 
-@app.teardown_appcontext
-def close_connection(exception):
-    db = getattr(g, '_database', None)
-    if db is not None:
-        db.close()
+        /* Filtros */
+        .filtros {
+            display:flex;
+            flex-wrap:wrap;
+            gap:1rem;
+            margin-bottom:1.5rem;
+            align-items:flex-end;
+        }
+        .filtros .field-group { flex:1; min-width:150px; }
 
-def init_db():
-    with app.app_context():
-        db = get_db()
-        cursor = db.cursor()
-        cursor.executescript('''
-            CREATE TABLE IF NOT EXISTS conselheiros (
-                id INTEGER PRIMARY KEY,
-                nome TEXT NOT NULL,
-                senha_hash TEXT NOT NULL,
-                obs TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS pessoas (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conselheiro_id INTEGER NOT NULL,
-                nome TEXT NOT NULL,
-                obs TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS casais (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conselheiro_id INTEGER NOT NULL,
-                nome_casal TEXT,
-                id_homem INTEGER NOT NULL,
-                id_mulher INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE,
-                FOREIGN KEY (id_homem) REFERENCES pessoas(id) ON DELETE CASCADE,
-                FOREIGN KEY (id_mulher) REFERENCES pessoas(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS sessoes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conselheiro_id INTEGER NOT NULL,
-                data TEXT NOT NULL,
-                caso_num TEXT NOT NULL,
-                sessao_num INTEGER NOT NULL,
-                duracao TEXT,
-                is_casal INTEGER NOT NULL,
-                id_pessoa INTEGER,
-                id_casal INTEGER,
-                versiculo TEXT,
-                anotacao_sessao TEXT,
-                tasks TEXT,
-                tarefas_anteriores TEXT,
-                assuntos_nesta TEXT,
-                assuntos_proximas TEXT,
-                status TEXT DEFAULT 'realizada',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS anexos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                sessao_id INTEGER NOT NULL,
-                conselheiro_id INTEGER NOT NULL,
-                nome_original TEXT NOT NULL,
-                nome_arquivo TEXT NOT NULL,
-                caminho TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (sessao_id) REFERENCES sessoes(id) ON DELETE CASCADE,
-                FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS lembretes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conselheiro_id INTEGER NOT NULL,
-                sessao_id INTEGER,
-                titulo TEXT NOT NULL,
-                descricao TEXT,
-                data_lembrete TEXT NOT NULL,
-                concluido INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE,
-                FOREIGN KEY (sessao_id) REFERENCES sessoes(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conselheiro_id INTEGER NOT NULL,
-                acao TEXT NOT NULL,
-                detalhes TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS tokens_blacklist (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                token TEXT NOT NULL,
-                expira_em TIMESTAMP NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS configuracoes (
-                chave TEXT PRIMARY KEY,
-                valor TEXT NOT NULL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        ''')
-        # Migrações
-        colunas_sessoes = [row['name'] for row in cursor.execute("PRAGMA table_info(sessoes)")]
-        if 'status' not in colunas_sessoes:
-            cursor.execute("ALTER TABLE sessoes ADD COLUMN status TEXT DEFAULT 'realizada'")
-        if 'tarefas_anteriores' not in colunas_sessoes:
-            cursor.execute("ALTER TABLE sessoes ADD COLUMN tarefas_anteriores TEXT")
-        if 'created_at' not in colunas_sessoes:
-            cursor.execute("ALTER TABLE sessoes ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        if 'updated_at' not in colunas_sessoes:
-            cursor.execute("ALTER TABLE sessoes ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        /* Modais */
+        .modal {
+            display:none;
+            position:fixed;
+            top:0;
+            left:0;
+            width:100%;
+            height:100%;
+            background:rgba(0,0,0,0.5);
+            backdrop-filter:blur(4px);
+            justify-content:center;
+            align-items:center;
+            z-index:1000;
+        }
+        .modal.active { display:flex; }
+        .modal-content {
+            background:var(--card);
+            max-width:700px;
+            width:92%;
+            max-height:85vh;
+            overflow-y:auto;
+            border-radius:32px;
+            padding:1.8rem 2rem;
+            box-shadow:0 30px 50px rgba(0,0,0,0.2);
+        }
+        .modal-content h3 { font-size:1.4rem; margin-bottom:1rem; border-bottom:2px solid var(--border); padding-bottom:0.5rem; }
+        .modal-content .modal-actions { display:flex; justify-content:flex-end; gap:0.8rem; margin-top:1.5rem; }
+        .modal-task-item {
+            background:var(--bg);
+            border-radius:20px;
+            padding:1rem;
+            margin-bottom:0.8rem;
+        }
+        .modal-task-item .task-desc { font-weight:500; margin-bottom:0.5rem; }
 
-        colunas_lembretes = [row['name'] for row in cursor.execute("PRAGMA table_info(lembretes)")]
-        if 'sessao_id' not in colunas_lembretes:
-            cursor.execute("ALTER TABLE lembretes ADD COLUMN sessao_id INTEGER REFERENCES sessoes(id) ON DELETE CASCADE")
+        /* Toast */
+        .toast-container {
+            position:fixed;
+            bottom:2rem;
+            right:2rem;
+            display:flex;
+            flex-direction:column;
+            gap:0.6rem;
+            z-index:2000;
+            max-width:360px;
+        }
+        .toast {
+            background:var(--text);
+            color:var(--card);
+            padding:0.8rem 1.2rem;
+            border-radius:16px;
+            box-shadow:0 8px 20px rgba(0,0,0,0.15);
+            font-size:0.95rem;
+            animation:slideIn 0.3s ease;
+            display:flex;
+            align-items:center;
+            gap:0.6rem;
+        }
+        .toast.success { background:var(--secondary); }
+        .toast.error { background:#b53b2e; }
+        .toast.info { background:#2a5f7a; }
+        @keyframes slideIn {
+            from { opacity:0; transform:translateY(20px); }
+            to { opacity:1; transform:translateY(0); }
+        }
+        .toast .close-toast { background:transparent; color:inherit; padding:0 0.3rem; font-size:1.2rem; cursor:pointer; border:none; }
+        .spinner {
+            display:inline-block;
+            width:20px;
+            height:20px;
+            border:3px solid rgba(181,139,75,0.2);
+            border-top-color:var(--primary);
+            border-radius:50%;
+            animation:spin 0.8s linear infinite;
+        }
+        @keyframes spin { to { transform:rotate(360deg); } }
 
-        # Configurações padrão
-        cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('cor_primaria', '#b58b4b')")
-        cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('cor_secundaria', '#2d6a4f')")
-        cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('cor_fundo', '#f5f1eb')")
-        cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('cor_texto', '#2e2b28')")
-        cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('logo_url', '')")
-        cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('nome_igreja', 'Igreja Batista')")
+        /* Configurações */
+        .config-group {
+            display:grid;
+            grid-template-columns:1fr 1fr;
+            gap:1rem;
+        }
+        .config-group .field-group { grid-column:auto; }
+        .config-group .field-group.full { grid-column:1/-1; }
 
-        db.commit()
+        /* Responsividade */
+        @media(max-width:700px) {
+            .tab-content { padding:1.2rem; }
+            .app-header h1 { font-size:1.4rem; }
+            .dashboard-stats { grid-template-columns:1fr 1fr; }
+            .config-group { grid-template-columns:1fr; }
+        }
+        @media(max-width:480px) {
+            .dashboard-stats { grid-template-columns:1fr; }
+            .auth-container { padding:1.5rem; }
+        }
+        ::-webkit-scrollbar { width:6px; }
+        ::-webkit-scrollbar-track { background:var(--border); border-radius:10px; }
+        ::-webkit-scrollbar-thumb { background:#c4b5a6; border-radius:10px; }
+        .btn-nova-sessao { background:var(--secondary); color:#fff; }
+        .btn-nova-sessao:hover { filter:brightness(0.9); }
+    </style>
+</head>
+<body>
+<div class="container">
 
-init_db()
+    <!-- TELA DE LOGIN -->
+    <div id="telaLogin" class="auth-container">
+        <h2>🕊️ Aconselhamento Bíblico</h2>
+        <p>Acesse com seu ID e senha</p>
+        <input type="number" id="loginId" placeholder="ID numérico" />
+        <input type="password" id="loginSenha" placeholder="Senha" />
+        <button id="btnLogin" class="primary">Entrar</button>
+        <button id="btnMostrarRegistro" class="secondary">Cadastrar</button>
+    </div>
 
-# ===== SERVE FRONTEND =====
-@app.route('/')
-def serve_index():
-    return send_file('frontend/index.html')
+    <!-- TELA DE REGISTRO -->
+    <div id="telaRegistro" class="auth-container" style="display:none;">
+        <h2>📝 Cadastro</h2>
+        <input type="number" id="regId" placeholder="ID numérico" />
+        <input type="text" id="regNome" placeholder="Nome completo" />
+        <input type="password" id="regSenha" placeholder="Senha" />
+        <input type="text" id="regObs" placeholder="Observações (opcional)" />
+        <button id="btnRegistrar" class="primary">Registrar</button>
+        <button id="btnVoltarLogin" class="secondary">Voltar</button>
+    </div>
 
-@app.route('/<path:path>')
-def serve_static(path):
-    return send_from_directory('frontend', path)
+    <!-- APP PRINCIPAL -->
+    <div id="appPrincipal" style="display:none;">
+        <div class="app-header">
+            <h1 id="appTitle">🕊️ Aconselhamento Bíblico</h1>
+            <div class="user-info">
+                <span id="userNameDisplay" style="font-weight:500;"></span>
+                <button id="logoutBtn" class="btn-logout">🚪 Sair</button>
+            </div>
+        </div>
 
-# ===== BACKUP AUTOMÁTICO =====
-def fazer_backup():
-    if not os.path.exists(DATABASE):
-        return
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    backup_name = f"acompanhamento_backup_{timestamp}.db"
-    backup_path = os.path.join(app.config['BACKUP_FOLDER'], backup_name)
-    shutil.copy2(DATABASE, backup_path)
-    backups = sorted([f for f in os.listdir(app.config['BACKUP_FOLDER']) if f.endswith('.db')])
-    if len(backups) > 30:
-        for f in backups[:-30]:
-            os.remove(os.path.join(app.config['BACKUP_FOLDER'], f))
-    print(f"Backup realizado: {backup_path}")
+        <!-- Abas -->
+        <div class="tabs">
+            <button class="tab-btn active" data-tab="dashboard">📊 Dashboard</button>
+            <button class="tab-btn" data-tab="sessoes">📝 Sessões</button>
+            <button class="tab-btn" data-tab="consultas">🔍 Consultas</button>
+            <button class="tab-btn" data-tab="pessoas">👤 Pessoas</button>
+            <button class="tab-btn" data-tab="casais">💍 Casais</button>
+            <button class="tab-btn" data-tab="lembretes">⏰ Lembretes</button>
+            <button class="tab-btn" data-tab="relatorios">📊 Relatórios</button>
+            <button class="tab-btn" data-tab="configuracoes">⚙️ Configurações</button>
+        </div>
 
-scheduler = BackgroundScheduler()
-scheduler.add_job(fazer_backup, trigger=IntervalTrigger(days=1), next_run_time=datetime.now() + timedelta(hours=1))
-scheduler.start()
+        <!-- DASHBOARD -->
+        <div id="tab-dashboard" class="tab-content active">
+            <div class="card-title">📊 Visão Geral</div>
+            <div class="dashboard-stats" id="statsContainer">
+                <div class="stat-card"><div class="number" id="statSessoes">0</div><div class="label">Sessões</div></div>
+                <div class="stat-card"><div class="number" id="statPessoas">0</div><div class="label">Pessoas</div></div>
+                <div class="stat-card"><div class="number" id="statCasais">0</div><div class="label">Casais</div></div>
+                <div class="stat-card"><div class="number" id="statTarefasPendentes">0</div><div class="label">Tarefas pendentes</div></div>
+                <div class="stat-card"><div class="number" id="statLembretes">0</div><div class="label">Lembretes</div></div>
+            </div>
+            <div class="chart-container"><canvas id="sessoesChart"></canvas></div>
+            <div style="display:flex;gap:0.8rem;flex-wrap:wrap;">
+                <button id="btnBackup" class="primary">💾 Baixar Backup</button>
+            </div>
+        </div>
 
-# ===== AUTENTICAÇÃO =====
-def gerar_token(conselheiro_id, refresh=False):
-    exp = datetime.utcnow() + (timedelta(days=7) if refresh else timedelta(hours=1))
-    payload = {'id': conselheiro_id, 'refresh': refresh, 'exp': exp}
-    return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
+        <!-- SESSÕES -->
+        <div id="tab-sessoes" class="tab-content">
+            <div class="card-title">✍️ Registrar / Editar Sessão</div>
+            <form id="counselingForm">
+                <div class="form-grid">
+                    <div class="field-group"><label>📅 Data</label><input type="date" id="data" required /></div>
+                    <div class="field-group"><label>📁 Caso Nº</label><input type="text" id="casoNum" required /></div>
+                    <div class="field-group"><label>🔢 Sessão Nº</label><input type="number" id="sessaoNum" disabled style="background:#e8e0d8;" /></div>
+                    <div class="field-group"><label>⏱️ Duração</label><input type="text" id="duracao" placeholder="Ex: 45 min" /></div>
+                    <div class="field-group"><label>📌 Status</label>
+                        <select id="sessaoStatus">
+                            <option value="realizada">Realizada</option>
+                            <option value="agendada">Agendada</option>
+                            <option value="cancelada">Cancelada</option>
+                        </select>
+                    </div>
+                    <div class="field-group" style="flex-direction:row;gap:0.5rem;align-items:center;">
+                        <input type="checkbox" id="isCasal" /> <label>👫 É casal?</label>
+                    </div>
+                </div>
+                <div id="casalBlock" style="display:none;">
+                    <div class="field-group full-width"><label>Selecione o Casal</label><select id="casalSelect"></select></div>
+                </div>
+                <div id="individualBlock">
+                    <div class="field-group full-width"><label>Selecione o Aconselhado</label><select id="pessoaSelect"></select></div>
+                </div>
 
-def autenticar_token(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        auth_header = request.headers.get('Authorization')
-        if not auth_header:
-            return jsonify({'erro': 'Token não fornecido'}), 401
-        try:
-            token = auth_header.split(' ')[1]
-            db = get_db()
-            cursor = db.cursor()
-            cursor.execute('SELECT 1 FROM tokens_blacklist WHERE token = ?', (token,))
-            if cursor.fetchone():
-                return jsonify({'erro': 'Token revogado'}), 403
-            payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-            if payload.get('refresh'):
-                return jsonify({'erro': 'Use token de acesso'}), 403
-            request.user_id = payload['id']
-        except jwt.ExpiredSignatureError:
-            return jsonify({'erro': 'Token expirado'}), 403
-        except jwt.InvalidTokenError:
-            return jsonify({'erro': 'Token inválido'}), 403
-        return f(*args, **kwargs)
-    return decorated
+                <!-- Tarefas anteriores -->
+                <div class="field-group full-width" id="tarefasAnterioresContainer">
+                    <label>📋 Tarefas pendentes da última sessão</label>
+                    <div id="tarefasAnterioresList"></div>
+                    <div style="margin-top:0.5rem;">
+                        <button type="button" id="btnCarregarTarefas" class="secondary" style="font-size:0.8rem;">🔄 Recarregar tarefas</button>
+                    </div>
+                </div>
 
-def log_acao(conselheiro_id, acao, detalhes=None):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('INSERT INTO logs (conselheiro_id, acao, detalhes) VALUES (?, ?, ?)',
-                   (conselheiro_id, acao, detalhes))
-    db.commit()
+                <div class="field-group full-width"><label>📋 Tarefas da semana (máx 6)</label>
+                    <div id="tasksContainer"></div>
+                    <button type="button" id="addTaskBtn" class="secondary" style="margin-top:0.3rem;">+ Adicionar tarefa</button>
+                </div>
+                <div class="field-group full-width"><label>📖 Versículo</label><input type="text" id="versiculo" placeholder="Ex: João 3:16" /></div>
+                <div class="field-group full-width"><label>📝 Anotação</label><textarea id="anotacaoSessao" rows="3"></textarea></div>
+                <div class="field-group full-width"><label>🎯 Assuntos tratados NESTA sessão</label>
+                    <div id="assuntosNestaContainer"></div>
+                    <div style="display:flex;gap:0.5rem;"><input type="text" id="novoAssuntoNesta" placeholder="Assunto" style="flex:1;" /><button type="button" id="addAssuntoNestaBtn" class="secondary">+</button></div>
+                </div>
+                <div class="field-group full-width"><label>📌 Assuntos para PRÓXIMAS sessões</label>
+                    <div id="assuntosProximasContainer"></div>
+                    <div style="display:flex;gap:0.5rem;"><input type="text" id="novoAssuntoProxima" placeholder="Assunto" style="flex:1;" /><button type="button" id="addAssuntoProximaBtn" class="secondary">+</button></div>
+                </div>
+                <div style="display:flex;gap:1rem;justify-content:flex-end;margin-top:1.5rem;flex-wrap:wrap;">
+                    <button type="button" id="btnNovaSessao" class="btn-nova-sessao">✨ Nova Sessão</button>
+                    <button type="button" id="cancelEditBtn" class="danger">Cancelar</button>
+                    <button type="submit" class="primary">💾 Salvar</button>
+                </div>
+            </form>
+            <div style="margin-top:2rem;display:flex;gap:0.8rem;flex-wrap:wrap;">
+                <button id="exportCSVBtn" class="primary">📎 CSV</button>
+                <button id="exportPDFBtn" class="primary">🖨️ PDF</button>
+                <button id="exportExcelBtn" class="primary">📊 Excel</button>
+            </div>
+        </div>
 
-def obter_proximo_sessao_num(conselheiro_id, caso_num):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT MAX(sessao_num) as max_num FROM sessoes WHERE conselheiro_id = ? AND caso_num = ?',
-                   (conselheiro_id, caso_num))
-    row = cursor.fetchone()
-    return (row['max_num'] or 0) + 1
+        <!-- CONSULTAS -->
+        <div id="tab-consultas" class="tab-content">
+            <div class="card-title">🔍 Consultar Sessões</div>
+            <div class="filtros">
+                <div class="field-group"><label>Aconselhado</label><input type="text" id="filtroNome" placeholder="Nome" /></div>
+                <div class="field-group"><label>Status</label><select id="filtroStatus"><option value="">Todos</option><option value="realizada">Realizada</option><option value="agendada">Agendada</option><option value="cancelada">Cancelada</option></select></div>
+                <div class="field-group"><label>Data inicial</label><input type="date" id="filtroDataInicio" /></div>
+                <div class="field-group"><label>Data final</label><input type="date" id="filtroDataFim" /></div>
+                <div class="field-group"><label>Assunto</label><input type="text" id="filtroAssunto" placeholder="Assunto" /></div>
+                <div><button id="aplicarFiltrosBtn" class="primary">🔎 Filtrar</button> <button id="limparFiltrosBtn" class="secondary">Limpar</button></div>
+            </div>
+            <div id="resultadosConsultas" class="records-list"></div>
+            <div style="text-align:center;margin-top:1rem;"><button id="carregarMaisBtn" class="secondary" style="display:none;">Carregar mais</button></div>
+        </div>
 
-# ===== ROTAS PÚBLICAS =====
-@app.route('/api/registrar', methods=['POST'])
-def registrar():
-    data = request.json
-    id_ = data.get('id')
-    nome = data.get('nome')
-    senha = data.get('senha')
-    obs = data.get('obs', '')
-    if not id_ or not nome or not senha:
-        return jsonify({'erro': 'ID, nome e senha são obrigatórios'}), 400
-    if not isinstance(id_, int) or id_ <= 0:
-        return jsonify({'erro': 'ID deve ser um número inteiro positivo'}), 400
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT id FROM conselheiros WHERE id = ?', (id_,))
-    if cursor.fetchone():
-        return jsonify({'erro': 'Este ID já está em uso'}), 400
-    senha_hash = bcrypt.hashpw(senha.encode('utf-8'), bcrypt.gensalt(12)).decode('utf-8')
-    cursor.execute('INSERT INTO conselheiros (id, nome, senha_hash, obs) VALUES (?, ?, ?, ?)',
-                   (id_, nome, senha_hash, obs))
-    db.commit()
-    log_acao(id_, 'registro', f'Conselheiro {nome} cadastrado')
-    return jsonify({'mensagem': 'Conselheiro registrado com sucesso'}), 201
+        <!-- PESSOAS -->
+        <div id="tab-pessoas" class="tab-content">
+            <div class="card-title">👤 Pessoas</div>
+            <div class="form-grid">
+                <div class="field-group"><label>Nome</label><input type="text" id="novaPessoaNome" placeholder="Nome" /></div>
+                <div class="field-group"><label>Observações</label><input type="text" id="novaPessoaObs" placeholder="Telefone, email..." /></div>
+                <div><button id="addPessoaBtn" class="primary">➕ Adicionar</button></div>
+            </div>
+            <div id="pessoasList"></div>
+        </div>
 
-@app.route('/api/login', methods=['POST'])
-def login():
-    data = request.json
-    id_ = data.get('id')
-    senha = data.get('senha')
-    if not id_ or not senha:
-        return jsonify({'erro': 'ID e senha são obrigatórios'}), 400
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT * FROM conselheiros WHERE id = ?', (id_,))
-    conselheiro = cursor.fetchone()
-    if not conselheiro:
-        return jsonify({'erro': 'ID ou senha inválidos'}), 401
-    if not bcrypt.checkpw(senha.encode('utf-8'), conselheiro['senha_hash'].encode('utf-8')):
-        return jsonify({'erro': 'ID ou senha inválidos'}), 401
-    token = gerar_token(conselheiro['id'], refresh=False)
-    refresh = gerar_token(conselheiro['id'], refresh=True)
-    log_acao(conselheiro['id'], 'login', 'Login realizado')
-    return jsonify({
-        'token': token,
-        'refresh': refresh,
-        'conselheiro': {'id': conselheiro['id'], 'nome': conselheiro['nome'], 'obs': conselheiro['obs']}
-    })
+        <!-- CASAIS -->
+        <div id="tab-casais" class="tab-content">
+            <div class="card-title">💍 Casais</div>
+            <div class="form-grid">
+                <div class="field-group"><label>Nome do Casal</label><input type="text" id="novoCasalNome" placeholder="Ex: João e Maria" /></div>
+                <div class="field-group"><label>Marido</label><select id="casalHomemSelect"></select></div>
+                <div class="field-group"><label>Esposa</label><select id="casalMulherSelect"></select></div>
+                <div><button id="addCasalBtn" class="primary">➕ Adicionar</button></div>
+            </div>
+            <div id="casaisList"></div>
+        </div>
 
-@app.route('/api/refresh', methods=['POST'])
-def refresh_token():
-    data = request.json
-    refresh_token = data.get('refresh')
-    if not refresh_token:
-        return jsonify({'erro': 'Refresh token não fornecido'}), 401
-    try:
-        payload = jwt.decode(refresh_token, app.config['SECRET_KEY'], algorithms=['HS256'])
-        if not payload.get('refresh'):
-            return jsonify({'erro': 'Token inválido'}), 403
-        db = get_db()
-        cursor = db.cursor()
-        cursor.execute('SELECT 1 FROM tokens_blacklist WHERE token = ?', (refresh_token,))
-        if cursor.fetchone():
-            return jsonify({'erro': 'Token revogado'}), 403
-        novo_token = gerar_token(payload['id'], refresh=False)
-        return jsonify({'token': novo_token})
-    except jwt.ExpiredSignatureError:
-        return jsonify({'erro': 'Refresh token expirado'}), 403
-    except jwt.InvalidTokenError:
-        return jsonify({'erro': 'Refresh token inválido'}), 403
+        <!-- LEMBRETES -->
+        <div id="tab-lembretes" class="tab-content">
+            <div class="card-title">⏰ Lembretes</div>
+            <div class="form-grid">
+                <div class="field-group"><label>Título</label><input type="text" id="novoLembreteTitulo" placeholder="Título" /></div>
+                <div class="field-group"><label>Descrição</label><input type="text" id="novoLembreteDescricao" placeholder="Detalhes" /></div>
+                <div class="field-group"><label>Data</label><input type="date" id="novoLembreteData" /></div>
+                <div class="field-group"><label>Vincular à sessão</label><select id="novoLembreteSessao"><option value="">Nenhuma</option></select></div>
+                <div><button id="addLembreteBtn" class="primary">➕ Adicionar</button></div>
+            </div>
+            <div id="lembretesList"></div>
+        </div>
 
-@app.route('/api/logout', methods=['POST'])
-@autenticar_token
-def logout():
-    token = request.headers.get('Authorization').split(' ')[1]
-    db = get_db()
-    cursor = db.cursor()
-    exp = datetime.utcnow() + timedelta(days=1)
-    cursor.execute('INSERT INTO tokens_blacklist (token, expira_em) VALUES (?, ?)', (token, exp))
-    db.commit()
-    log_acao(request.user_id, 'logout', 'Logout realizado')
-    return jsonify({'mensagem': 'Deslogado com sucesso'})
+        <!-- RELATÓRIOS -->
+        <div id="tab-relatorios" class="tab-content">
+            <div class="card-title">📊 Relatórios Personalizados</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;">
+                <div>
+                    <h4>📋 Tarefas Pendentes</h4>
+                    <button id="btnRelTarefasPendentes" class="primary" style="margin-bottom:0.5rem;">Gerar</button>
+                    <div id="relTarefasPendentes"></div>
+                </div>
+                <div>
+                    <h4>📅 Sessões por Período</h4>
+                    <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+                        <input type="date" id="relPeriodoInicio" />
+                        <input type="date" id="relPeriodoFim" />
+                        <button id="btnRelPeriodo" class="primary">Gerar</button>
+                    </div>
+                    <div id="relPeriodoResultado"></div>
+                </div>
+                <div style="grid-column:1/-1;">
+                    <h4>👤 Pessoas Atendidas</h4>
+                    <button id="btnRelPessoas" class="primary" style="margin-bottom:0.5rem;">Gerar</button>
+                    <div id="relPessoas"></div>
+                </div>
+            </div>
+        </div>
 
-# ===== CONFIGURAÇÕES =====
-@app.route('/api/configuracoes', methods=['GET'])
-@autenticar_token
-def get_configuracoes():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT chave, valor FROM configuracoes')
-    rows = cursor.fetchall()
-    return jsonify({row['chave']: row['valor'] for row in rows})
+        <!-- CONFIGURAÇÕES -->
+        <div id="tab-configuracoes" class="tab-content">
+            <div class="card-title">⚙️ Personalização</div>
+            <form id="configForm" class="config-group">
+                <div class="field-group"><label>Cor Primária</label><input type="color" id="corPrimaria" value="#b58b4b" /></div>
+                <div class="field-group"><label>Cor Secundária</label><input type="color" id="corSecundaria" value="#2d6a4f" /></div>
+                <div class="field-group"><label>Cor de Fundo</label><input type="color" id="corFundo" value="#f5f1eb" /></div>
+                <div class="field-group"><label>Cor do Texto</label><input type="color" id="corTexto" value="#2e2b28" /></div>
+                <div class="field-group full"><label>Nome da Igreja</label><input type="text" id="nomeIgreja" value="Igreja Batista" /></div>
+                <div class="field-group full"><label>URL do Logo</label><input type="text" id="logoUrl" placeholder="https://exemplo.com/logo.png" /></div>
+                <div style="grid-column:1/-1;display:flex;gap:1rem;flex-wrap:wrap;">
+                    <button type="submit" class="primary">💾 Salvar Configurações</button>
+                    <button type="button" id="btnResetConfig" class="secondary">↩️ Restaurar Padrão</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
 
-@app.route('/api/configuracoes', methods=['POST'])
-@autenticar_token
-def update_configuracoes():
-    data = request.json
-    db = get_db()
-    cursor = db.cursor()
-    for chave, valor in data.items():
-        cursor.execute('UPDATE configuracoes SET valor = ?, updated_at = CURRENT_TIMESTAMP WHERE chave = ?',
-                       (valor, chave))
-    db.commit()
-    log_acao(request.user_id, 'atualizar_configuracoes', 'Configurações atualizadas')
-    return jsonify({'mensagem': 'Configurações salvas'})
+<!-- MODAIS -->
+<div id="avaliacaoModal" class="modal">
+    <div class="modal-content">
+        <h3>📋 Avaliar Tarefas</h3>
+        <div id="modalTasksList"></div>
+        <div class="modal-actions">
+            <button id="closeModalBtn" class="secondary">Fechar</button>
+            <button id="saveAvaliacaoBtn" class="primary">💾 Salvar</button>
+        </div>
+    </div>
+</div>
+<div id="anexosModal" class="modal">
+    <div class="modal-content">
+        <h3>📎 Anexos</h3>
+        <div id="anexosList"></div>
+        <div style="margin:1rem 0;"><input type="file" id="anexoFileInput" /> <button id="uploadAnexoBtn" class="primary">📤 Enviar</button></div>
+        <div class="modal-actions"><button id="closeAnexosModalBtn" class="secondary">Fechar</button></div>
+    </div>
+</div>
+<div id="toastContainer" class="toast-container"></div>
 
-# ===== PESSOAS =====
-@app.route('/api/pessoas', methods=['GET'])
-@autenticar_token
-def listar_pessoas():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT * FROM pessoas WHERE conselheiro_id = ? ORDER BY nome', (request.user_id,))
-    rows = cursor.fetchall()
-    return jsonify([dict(row) for row in rows])
+<script>
+// ===== CONFIGURAÇÕES GLOBAIS =====
+const API_BASE = '/api';
+let token = null, refreshToken = null, currentUser = null;
+let pessoas = [], casais = [], sessoesCache = [], lembretes = [];
+let currentPage = 1, totalPages = 1, isLoading = false, currentEditSessionId = null;
+let tasksArray = [], assuntosNestaArray = [], assuntosProximasArray = [];
+let tarefasAnteriores = []; // {sessao_origem_id, indice, descricao, avaliacao?}
+let currentAvaliacaoSessionId = null, currentAnexosSessaoId = null, chartInstance = null;
 
-@app.route('/api/pessoas', methods=['POST'])
-@autenticar_token
-def criar_pessoa():
-    data = request.json
-    nome = data.get('nome')
-    obs = data.get('obs', '')
-    if not nome:
-        return jsonify({'erro': 'Nome é obrigatório'}), 400
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('INSERT INTO pessoas (conselheiro_id, nome, obs) VALUES (?, ?, ?)',
-                   (request.user_id, nome, obs))
-    db.commit()
-    log_acao(request.user_id, 'criar_pessoa', f'Pessoa {nome} criada')
-    return jsonify({'id': cursor.lastrowid, 'nome': nome, 'obs': obs}), 201
+// ===== UTILITÁRIOS =====
+function getPessoaNome(id) { const p = pessoas.find(p => p.id == id); return p ? p.nome : '?'; }
+function getCasalNome(id) { const c = casais.find(c => c.id == id); if (c) return c.nome_casal || `${getPessoaNome(c.id_homem)} & ${getPessoaNome(c.id_mulher)}`; return '?'; }
+function formatDateBR(iso) { if (!iso) return ''; const [y, m, d] = iso.split('-'); return `${d}/${m}/${y}`; }
+function escapeHtml(s) { if (!s) return ''; return String(s).replace(/[&<>]/g, m => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;' }[m] || m)); }
+function showToast(msg, type = 'info') {
+    const c = document.getElementById('toastContainer');
+    const t = document.createElement('div');
+    t.className = `toast ${type}`;
+    t.innerHTML = `<span>${escapeHtml(msg)}</span><button class="close-toast">&times;</button>`;
+    t.querySelector('.close-toast').addEventListener('click', () => t.remove());
+    c.appendChild(t);
+    setTimeout(() => t.remove(), 5000);
+}
 
-@app.route('/api/pessoas/<int:id>', methods=['DELETE'])
-@autenticar_token
-def deletar_pessoa(id):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('DELETE FROM pessoas WHERE id = ? AND conselheiro_id = ?', (id, request.user_id))
-    db.commit()
-    return jsonify({'deletado': cursor.rowcount})
+// ===== API =====
+async function apiFetch(endpoint, opts = {}) {
+    const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}`, ...opts.headers };
+    let resp = await fetch(`${API_BASE}${endpoint}`, { ...opts, headers });
+    if (resp.status === 403) {
+        try {
+            const r = await fetch(`${API_BASE}/refresh`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ refresh: refreshToken })
+            });
+            if (r.ok) {
+                const d = await r.json();
+                token = d.token;
+                localStorage.setItem('token', token);
+                headers.Authorization = `Bearer ${token}`;
+                resp = await fetch(`${API_BASE}${endpoint}`, { ...opts, headers });
+            } else {
+                fazerLogout();
+                throw new Error('Sessão expirada');
+            }
+        } catch (e) {
+            fazerLogout();
+            throw new Error('Erro ao renovar token');
+        }
+    }
+    if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.erro || 'Erro na requisição');
+    }
+    return resp.json();
+}
 
-# ===== CASAIS =====
-@app.route('/api/casais', methods=['GET'])
-@autenticar_token
-def listar_casais():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT * FROM casais WHERE conselheiro_id = ? ORDER BY nome_casal', (request.user_id,))
-    rows = cursor.fetchall()
-    return jsonify([dict(row) for row in rows])
+// ===== AUTENTICAÇÃO =====
+async function fazerLogin() {
+    const id = parseInt(document.getElementById('loginId').value);
+    const senha = document.getElementById('loginSenha').value;
+    if (!id || !senha) return showToast('Preencha ID e senha', 'error');
+    try {
+        const resp = await fetch(`${API_BASE}/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, senha })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.erro);
+        token = data.token;
+        refreshToken = data.refresh;
+        currentUser = data.conselheiro;
+        localStorage.setItem('token', token);
+        localStorage.setItem('refresh', refreshToken);
+        localStorage.setItem('user', JSON.stringify(currentUser));
+        document.getElementById('telaLogin').style.display = 'none';
+        document.getElementById('telaRegistro').style.display = 'none';
+        document.getElementById('appPrincipal').style.display = 'block';
+        document.getElementById('userNameDisplay').textContent = currentUser.nome;
+        await carregarDadosIniciais();
+        showToast('Login realizado!', 'success');
+    } catch (e) {
+        showToast('Erro: ' + e.message, 'error');
+    }
+}
+function fazerLogout() {
+    token = null; refreshToken = null; currentUser = null;
+    localStorage.removeItem('token');
+    localStorage.removeItem('refresh');
+    localStorage.removeItem('user');
+    document.getElementById('appPrincipal').style.display = 'none';
+    document.getElementById('telaLogin').style.display = 'block';
+    document.getElementById('telaRegistro').style.display = 'none';
+}
+async function registrar() {
+    const id = parseInt(document.getElementById('regId').value);
+    const nome = document.getElementById('regNome').value.trim();
+    const senha = document.getElementById('regSenha').value;
+    const obs = document.getElementById('regObs').value;
+    if (!id || !nome || !senha) return showToast('Preencha ID, nome e senha', 'error');
+    try {
+        const resp = await fetch(`${API_BASE}/registrar`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, nome, senha, obs })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.erro);
+        showToast('Cadastro realizado! Faça login.', 'success');
+        document.getElementById('telaLogin').style.display = 'block';
+        document.getElementById('telaRegistro').style.display = 'none';
+    } catch (e) {
+        showToast('Erro: ' + e.message, 'error');
+    }
+}
+function mostrarRegistro() {
+    document.getElementById('telaLogin').style.display = 'none';
+    document.getElementById('telaRegistro').style.display = 'block';
+}
+function mostrarLogin() {
+    document.getElementById('telaLogin').style.display = 'block';
+    document.getElementById('telaRegistro').style.display = 'none';
+}
+function verificarTokenSalvo() {
+    const tk = localStorage.getItem('token');
+    const rf = localStorage.getItem('refresh');
+    const us = localStorage.getItem('user');
+    if (tk && rf && us) {
+        token = tk;
+        refreshToken = rf;
+        currentUser = JSON.parse(us);
+        document.getElementById('telaLogin').style.display = 'none';
+        document.getElementById('telaRegistro').style.display = 'none';
+        document.getElementById('appPrincipal').style.display = 'block';
+        document.getElementById('userNameDisplay').textContent = currentUser.nome;
+        carregarDadosIniciais();
+    }
+}
 
-@app.route('/api/casais', methods=['POST'])
-@autenticar_token
-def criar_casal():
-    data = request.json
-    nome_casal = data.get('nome_casal', '')
-    id_homem = data.get('id_homem')
-    id_mulher = data.get('id_mulher')
-    if not id_homem or not id_mulher:
-        return jsonify({'erro': 'Selecione marido e esposa'}), 400
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('INSERT INTO casais (conselheiro_id, nome_casal, id_homem, id_mulher) VALUES (?, ?, ?, ?)',
-                   (request.user_id, nome_casal, id_homem, id_mulher))
-    db.commit()
-    log_acao(request.user_id, 'criar_casal', f'Casal {nome_casal} criado')
-    return jsonify({'id': cursor.lastrowid}), 201
+// ===== CARREGAR DADOS =====
+async function carregarDadosIniciais() {
+    try {
+        const [stats, p, c, l] = await Promise.all([
+            apiFetch('/estatisticas'),
+            apiFetch('/pessoas'),
+            apiFetch('/casais'),
+            apiFetch('/lembretes')
+        ]);
+        pessoas = p;
+        casais = c;
+        lembretes = l;
+        await carregarSessoesPagina(1, true);
+        atualizarEstatisticas(stats);
+        renderizarTodasListas();
+        renderLembretes();
+        carregarConfiguracoes();
+    } catch (e) {
+        showToast('Erro ao carregar dados: ' + e.message, 'error');
+    }
+}
 
-@app.route('/api/casais/<int:id>', methods=['DELETE'])
-@autenticar_token
-def deletar_casal(id):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('DELETE FROM casais WHERE id = ? AND conselheiro_id = ?', (id, request.user_id))
-    db.commit()
-    return jsonify({'deletado': cursor.rowcount})
+async function carregarSessoesPagina(page, reset = false) {
+    if (isLoading) return;
+    isLoading = true;
+    try {
+        const params = new URLSearchParams({ page, per_page: 10 });
+        const st = document.getElementById('filtroStatus')?.value;
+        const di = document.getElementById('filtroDataInicio')?.value;
+        const df = document.getElementById('filtroDataFim')?.value;
+        const as = document.getElementById('filtroAssunto')?.value;
+        if (st) params.append('status', st);
+        if (di) params.append('data_inicio', di);
+        if (df) params.append('data_fim', df);
+        if (as) params.append('assunto', as);
+        const data = await apiFetch(`/sessoes?${params.toString()}`);
+        if (reset) sessoesCache = data.items;
+        else sessoesCache = [...sessoesCache, ...data.items];
+        totalPages = data.total_pages;
+        currentPage = data.page;
+        if (document.getElementById('tab-consultas').classList.contains('active')) renderSessoesLista(sessoesCache);
+        document.getElementById('carregarMaisBtn').style.display = currentPage < totalPages ? 'inline-block' : 'none';
+    } catch (e) {
+        showToast('Erro ao carregar sessões: ' + e.message, 'error');
+    } finally {
+        isLoading = false;
+    }
+}
 
-# ===== SESSÕES =====
-@app.route('/api/sessoes', methods=['GET'])
-@autenticar_token
-def listar_sessoes():
-    db = get_db()
-    cursor = db.cursor()
-    page = int(request.args.get('page', 1))
-    per_page = int(request.args.get('per_page', 20))
-    offset = (page - 1) * per_page
-    status_filter = request.args.get('status')
-    data_inicio = request.args.get('data_inicio')
-    data_fim = request.args.get('data_fim')
-    assunto = request.args.get('assunto')
+function atualizarEstatisticas(stats) {
+    document.getElementById('statSessoes').textContent = stats.total_sessoes;
+    document.getElementById('statPessoas').textContent = stats.total_pessoas;
+    document.getElementById('statCasais').textContent = stats.total_casais;
+    document.getElementById('statTarefasPendentes').textContent = stats.tarefas_pendentes;
+    document.getElementById('statLembretes').textContent = stats.lembretes_pendentes;
+    const ctx = document.getElementById('sessoesChart').getContext('2d');
+    if (chartInstance) chartInstance.destroy();
+    const labels = stats.sessoes_por_mes.map(i => i.mes);
+    const values = stats.sessoes_por_mes.map(i => i.total);
+    const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim() || '#b58b4b';
+    chartInstance = new Chart(ctx, {
+        type: 'bar',
+        data: { labels, datasets: [{ label: 'Sessões por mês', data: values, backgroundColor: primaryColor, borderRadius: 6 }] },
+        options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, grid: { color: '#e8dfd5' } }, x: { grid: { display: false } } } }
+    });
+}
 
-    query = 'SELECT * FROM sessoes WHERE conselheiro_id = ?'
-    params = [request.user_id]
-    if status_filter:
-        query += ' AND status = ?'
-        params.append(status_filter)
-    if data_inicio:
-        query += ' AND data >= ?'
-        params.append(data_inicio)
-    if data_fim:
-        query += ' AND data <= ?'
-        params.append(data_fim)
-    if assunto:
-        query += ' AND assuntos_nesta LIKE ?'
-        params.append(f'%{assunto}%')
-    query += ' ORDER BY data DESC LIMIT ? OFFSET ?'
-    params.extend([per_page, offset])
+// ===== RENDERIZAÇÃO DE LISTAS =====
+function renderPessoas() {
+    const c = document.getElementById('pessoasList');
+    if (!pessoas.length) { c.innerHTML = '<div class="empty-msg">Nenhuma pessoa.</div>'; return; }
+    c.innerHTML = '';
+    pessoas.forEach(p => {
+        const div = document.createElement('div');
+        div.className = 'lista-item';
+        div.innerHTML = `<div><strong>${escapeHtml(p.nome)}</strong><br><small>${escapeHtml(p.obs || '')}</small></div>
+                         <div><button class="delete-pessoa" data-id="${p.id}" class="danger">🗑️ Excluir</button></div>`;
+        c.appendChild(div);
+    });
+    document.querySelectorAll('.delete-pessoa').forEach(btn => btn.addEventListener('click', async () => {
+        if (confirm('Excluir?')) {
+            try { await apiFetch(`/pessoas/${btn.dataset.id}`, { method: 'DELETE' }); await carregarDadosIniciais(); showToast('Pessoa excluída', 'success'); } catch (e) { showToast(e.message, 'error'); }
+        }
+    }));
+}
 
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
-    resultado = []
-    for row in rows:
-        d = dict(row)
-        d['is_casal'] = bool(d['is_casal'])
-        d['tasks'] = json.loads(d['tasks'] or '[]')
-        d['tarefas_anteriores'] = json.loads(d['tarefas_anteriores'] or '[]')
-        d['assuntosNestaSessao'] = json.loads(d['assuntos_nesta'] or '[]')
-        d['assuntosProximasSessoes'] = json.loads(d['assuntos_proximas'] or '[]')
-        del d['assuntos_nesta']
-        del d['assuntos_proximas']
-        resultado.append(d)
+function renderCasais() {
+    const c = document.getElementById('casaisList');
+    if (!casais.length) { c.innerHTML = '<div class="empty-msg">Nenhum casal.</div>'; return; }
+    c.innerHTML = '';
+    casais.forEach(ca => {
+        const h = getPessoaNome(ca.id_homem), m = getPessoaNome(ca.id_mulher);
+        const div = document.createElement('div');
+        div.className = 'lista-item';
+        div.innerHTML = `<div><strong>${escapeHtml(ca.nome_casal || (h + ' & ' + m))}</strong><br>${h} + ${m}</div>
+                         <div><button class="delete-casal" data-id="${ca.id}" class="danger">🗑️ Excluir</button></div>`;
+        c.appendChild(div);
+    });
+    document.querySelectorAll('.delete-casal').forEach(btn => btn.addEventListener('click', async () => {
+        if (confirm('Excluir?')) {
+            try { await apiFetch(`/casais/${btn.dataset.id}`, { method: 'DELETE' }); await carregarDadosIniciais(); showToast('Casal excluído', 'success'); } catch (e) { showToast(e.message, 'error'); }
+        }
+    }));
+}
 
-    count_query = 'SELECT COUNT(*) as total FROM sessoes WHERE conselheiro_id = ?'
-    count_params = [request.user_id]
-    if status_filter:
-        count_query += ' AND status = ?'
-        count_params.append(status_filter)
-    if data_inicio:
-        count_query += ' AND data >= ?'
-        count_params.append(data_inicio)
-    if data_fim:
-        count_query += ' AND data <= ?'
-        count_params.append(data_fim)
-    if assunto:
-        count_query += ' AND assuntos_nesta LIKE ?'
-        count_params.append(f'%{assunto}%')
-    cursor.execute(count_query, count_params)
-    total = cursor.fetchone()['total']
-    return jsonify({
-        'items': resultado,
-        'total': total,
-        'page': page,
-        'per_page': per_page,
-        'total_pages': (total + per_page - 1) // per_page
-    })
+function renderLembretes() {
+    const c = document.getElementById('lembretesList');
+    if (!lembretes.length) { c.innerHTML = '<div class="empty-msg">Nenhum lembrete.</div>'; return; }
+    c.innerHTML = '';
+    lembretes.forEach(l => {
+        const div = document.createElement('div');
+        div.className = 'lista-item';
+        const st = l.concluido ? '✅ Concluído' : '⏳ Pendente';
+        div.innerHTML = `<div><strong>${escapeHtml(l.titulo)}</strong><br><small>${escapeHtml(l.descricao || '')} - ${formatDateBR(l.data_lembrete)}</small><br><span style="font-size:0.8rem;">${st}</span></div>
+                         <div style="display:flex;gap:0.5rem;"><button class="toggle-lembrete" data-id="${l.id}" data-concluido="${l.concluido}">${l.concluido ? '🔄 Reabrir' : '✅ Concluir'}</button><button class="delete-lembrete" data-id="${l.id}" class="danger">🗑️</button></div>`;
+        c.appendChild(div);
+    });
+    document.querySelectorAll('.toggle-lembrete').forEach(btn => btn.addEventListener('click', async () => {
+        const id = btn.dataset.id, concluido = parseInt(btn.dataset.concluido) ? 0 : 1;
+        try { await apiFetch(`/lembretes/${id}`, { method: 'PUT', body: JSON.stringify({ concluido }) }); await carregarDadosIniciais(); showToast('Lembrete atualizado', 'success'); } catch (e) { showToast(e.message, 'error'); }
+    }));
+    document.querySelectorAll('.delete-lembrete').forEach(btn => btn.addEventListener('click', async () => {
+        if (confirm('Excluir?')) {
+            try { await apiFetch(`/lembretes/${btn.dataset.id}`, { method: 'DELETE' }); await carregarDadosIniciais(); showToast('Lembrete excluído', 'success'); } catch (e) { showToast(e.message, 'error'); }
+        }
+    }));
+}
 
-@app.route('/api/sessoes', methods=['POST'])
-@autenticar_token
-def criar_sessao():
-    data = request.json
-    data_sessao = data.get('data')
-    caso_num = data.get('casoNum')
-    if not data_sessao or not caso_num:
-        return jsonify({'erro': 'Data e caso são obrigatórios'}), 400
+function renderSessoesLista(lista) {
+    const c = document.getElementById('resultadosConsultas');
+    if (!lista.length) { c.innerHTML = '<div class="empty-msg">Nenhuma sessão.</div>'; return; }
+    c.innerHTML = '';
+    lista.forEach(s => {
+        const div = document.createElement('div');
+        div.className = 'record-item';
+        let aconselhado = s.is_casal ? `💍 Casal: ${getCasalNome(s.id_casal)}` : `👤 ${getPessoaNome(s.id_pessoa)}`;
+        const statusBadge = s.status ? `<span class="badge">${s.status}</span>` : '';
+        let tarefasAntHtml = '';
+        if (s.tarefas_anteriores && s.tarefas_anteriores.length) {
+            tarefasAntHtml = '<div class="tasks-preview" style="border-left-color:var(--secondary);"><strong>📋 Tarefas anteriores:</strong><ul style="margin:0.3rem 0 0 1rem;">';
+            s.tarefas_anteriores.forEach(t => {
+                tarefasAntHtml += `<li>${escapeHtml(t.descricao)} <button class="avaliar-anterior" data-sessao="${s.id}" data-indice="${t.indice}" style="font-size:0.7rem;padding:0.1rem 0.6rem;">Avaliar</button></li>`;
+            });
+            tarefasAntHtml += '</ul></div>';
+        }
+        const tasksHtml = renderTasksPreview(s.tasks);
+        const assuntosHtml = renderAssuntosProximasPreview(s.assuntosProximasSessoes);
+        div.innerHTML = `
+            <div class="record-header"><strong>📅 ${formatDateBR(s.data)} | Caso ${s.caso_num} | Sessão ${s.sessao_num}</strong>${statusBadge}</div>
+            <div class="record-body">${aconselhado}<br>📖 ${s.versiculo ? s.versiculo.substring(0,60) : '—'}<br>🎯 Assuntos: ${(s.assuntosNestaSessao || []).slice(0,3).join(', ')}${s.assuntosNestaSessao?.length > 3 ? '...' : ''}</div>
+            ${tasksHtml}
+            ${tarefasAntHtml}
+            ${assuntosHtml}
+            <div class="record-actions">
+                <button class="avaliar-session" data-id="${s.id}" class="primary">📝 Avaliar Tarefas</button>
+                <button class="editar-session" data-id="${s.id}" class="secondary">✏️ Editar</button>
+                <button class="anexos-session" data-id="${s.id}" class="secondary">📎 Anexos</button>
+                <button class="deletar-session" data-id="${s.id}" class="danger">🗑️ Excluir</button>
+            </div>
+        `;
+        c.appendChild(div);
+    });
+    document.querySelectorAll('.avaliar-session').forEach(b => b.addEventListener('click', () => abrirAvaliacao(parseInt(b.dataset.id))));
+    document.querySelectorAll('.editar-session').forEach(b => b.addEventListener('click', () => editarSessao(parseInt(b.dataset.id))));
+    document.querySelectorAll('.anexos-session').forEach(b => b.addEventListener('click', () => abrirAnexos(parseInt(b.dataset.id))));
+    document.querySelectorAll('.deletar-session').forEach(b => b.addEventListener('click', async () => {
+        if (confirm('Excluir sessão?')) {
+            try { await apiFetch(`/sessoes/${b.dataset.id}`, { method: 'DELETE' }); await carregarDadosIniciais(); showToast('Sessão excluída', 'success'); } catch (e) { showToast(e.message, 'error'); }
+        }
+    }));
+    document.querySelectorAll('.avaliar-anterior').forEach(b => b.addEventListener('click', () => abrirAvaliacaoAnterior(parseInt(b.dataset.sessao), parseInt(b.dataset.indice))));
+}
 
-    is_casal = data.get('isCasal', False)
-    id_pessoa = data.get('idPessoa')
-    id_casal = data.get('idCasal')
-    if is_casal and not id_casal:
-        return jsonify({'erro': 'Casal não selecionado'}), 400
-    if not is_casal and not id_pessoa:
-        return jsonify({'erro': 'Pessoa não selecionada'}), 400
+function renderTasksPreview(tasks) {
+    if (!tasks || !tasks.length) return '<div class="tasks-preview">📭 Nenhuma tarefa.</div>';
+    let html = '<div class="tasks-preview"><strong>📋 Tarefas:</strong><ul style="margin:0.3rem 0 0 1rem;">';
+    tasks.forEach(t => { const av = t.avaliacao ? '✅' : '⏳'; html += `<li>${escapeHtml(t.descricao)} — <em>Avaliação:</em> ${escapeHtml(t.avaliacao || 'pendente')} ${av}</li>`; });
+    html += '</ul></div>';
+    return html;
+}
+function renderAssuntosProximasPreview(assuntos) {
+    if (!assuntos || !assuntos.length) return '<div class="assuntos-preview">📭 Nenhum assunto para próximas sessões.</div>';
+    let html = '<div class="assuntos-preview"><strong>📌 Próximos assuntos:</strong><ul style="margin:0.3rem 0 0 1rem;">';
+    assuntos.forEach(a => html += `<li>${escapeHtml(a)}</li>`);
+    html += '</ul></div>';
+    return html;
+}
 
-    sessao_num = obter_proximo_sessao_num(request.user_id, caso_num)
-    duracao = data.get('duracao', '')
-    versiculo = data.get('versiculo', '')
-    anotacao = data.get('anotacaoSessao', '')
-    status = data.get('status', 'realizada')
-    tasks = json.dumps(data.get('tasks', []))
-    assuntos_nesta = json.dumps(data.get('assuntosNestaSessao', []))
-    assuntos_proximas = json.dumps(data.get('assuntosProximasSessoes', []))
+function renderizarTodasListas() {
+    renderPessoas();
+    renderCasais();
+    atualizarSelectsPessoasCasais();
+    const sel = document.getElementById('novoLembreteSessao');
+    sel.innerHTML = '<option value="">Nenhuma</option>';
+    sessoesCache.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.id;
+        opt.textContent = `Caso ${s.caso_num} - Sessão ${s.sessao_num} (${formatDateBR(s.data)})`;
+        sel.appendChild(opt);
+    });
+    if (document.getElementById('tab-consultas').classList.contains('active')) renderSessoesLista(sessoesCache);
+    if (document.getElementById('tab-lembretes').classList.contains('active')) renderLembretes();
+}
 
-    tarefas_anteriores = []
-    db = get_db()
-    cursor = db.cursor()
-    if 'tarefas_anteriores' in data and data['tarefas_anteriores']:
-        tarefas_anteriores = data['tarefas_anteriores']
-    else:
-        cursor.execute('''
-            SELECT id, tasks FROM sessoes
-            WHERE conselheiro_id = ? AND caso_num = ? AND id != (SELECT MAX(id) FROM sessoes WHERE conselheiro_id = ? AND caso_num = ?)
-            ORDER BY sessao_num DESC LIMIT 1
-        ''', (request.user_id, caso_num, request.user_id, caso_num))
-        ultima = cursor.fetchone()
-        if ultima:
-            tasks_ant = json.loads(ultima['tasks'] or '[]')
-            for idx, t in enumerate(tasks_ant):
-                if not t.get('avaliacao', '').strip():
-                    tarefas_anteriores.append({
-                        'sessao_origem_id': ultima['id'],
-                        'indice': idx,
-                        'descricao': t.get('descricao', '')
-                    })
+function atualizarSelectsPessoasCasais() {
+    const ps = document.getElementById('pessoaSelect');
+    ps.innerHTML = '<option value="">-- Selecione --</option>' + pessoas.map(p => `<option value="${p.id}">${escapeHtml(p.nome)}</option>`).join('');
+    const cs = document.getElementById('casalSelect');
+    cs.innerHTML = '<option value="">-- Selecione --</option>' + casais.map(c => `<option value="${c.id}">${getCasalNome(c.id)}</option>`).join('');
+    const hs = document.getElementById('casalHomemSelect'), ms = document.getElementById('casalMulherSelect');
+    hs.innerHTML = '<option value="">-- Selecione --</option>' + pessoas.map(p => `<option value="${p.id}">${escapeHtml(p.nome)}</option>`).join('');
+    ms.innerHTML = '<option value="">-- Selecione --</option>' + pessoas.map(p => `<option value="${p.id}">${escapeHtml(p.nome)}</option>`).join('');
+}
 
-    tarefas_anteriores_json = json.dumps(tarefas_anteriores)
-    cursor.execute('''
-        INSERT INTO sessoes (
-            conselheiro_id, data, caso_num, sessao_num, duracao,
-            is_casal, id_pessoa, id_casal, versiculo, anotacao_sessao,
-            tasks, tarefas_anteriores, assuntos_nesta, assuntos_proximas, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        request.user_id, data_sessao, caso_num, sessao_num, duracao,
-        1 if is_casal else 0, id_pessoa, id_casal,
-        versiculo, anotacao,
-        tasks, tarefas_anteriores_json, assuntos_nesta, assuntos_proximas, status
-    ))
-    db.commit()
-    log_acao(request.user_id, 'criar_sessao', f'Sessão {caso_num}-{sessao_num} criada')
-    return jsonify({'id': cursor.lastrowid, 'sessao_num': sessao_num}), 201
+// ===== TAREFAS ANTERIORES =====
+async function carregarTarefasAnteriores() {
+    const isCasal = document.getElementById('isCasal').checked;
+    let pessoaId = null, casalId = null;
+    if (isCasal) {
+        casalId = parseInt(document.getElementById('casalSelect').value);
+        if (!casalId) { tarefasAnteriores = []; renderTarefasAnteriores(); return; }
+    } else {
+        pessoaId = parseInt(document.getElementById('pessoaSelect').value);
+        if (!pessoaId) { tarefasAnteriores = []; renderTarefasAnteriores(); return; }
+    }
+    try {
+        const params = new URLSearchParams();
+        if (pessoaId) params.append('pessoa_id', pessoaId);
+        else if (casalId) params.append('casal_id', casalId);
+        const data = await apiFetch(`/ultima_sessao?${params.toString()}`);
+        tarefasAnteriores = data.tarefas || [];
+        renderTarefasAnteriores();
+        if (tarefasAnteriores.length) showToast(`Carregadas ${tarefasAnteriores.length} tarefas pendentes da última sessão`, 'info');
+    } catch (e) {
+        showToast('Erro ao carregar tarefas anteriores: ' + e.message, 'error');
+    }
+}
 
-@app.route('/api/sessoes/<int:id>', methods=['PUT'])
-@autenticar_token
-def atualizar_sessao(id):
-    data = request.json
-    data_sessao = data.get('data')
-    caso_num = data.get('casoNum')
-    sessao_num = data.get('sessaoNum')
-    if not data_sessao or not caso_num or sessao_num is None:
-        return jsonify({'erro': 'Data, caso e número da sessão são obrigatórios'}), 400
+function renderTarefasAnteriores() {
+    const container = document.getElementById('tarefasAnterioresList');
+    container.innerHTML = '';
+    if (!tarefasAnteriores.length) {
+        container.innerHTML = '<div style="color:#9a8a7a;font-size:0.9rem;">Nenhuma tarefa pendente da sessão anterior.</div>';
+        return;
+    }
+    tarefasAnteriores.forEach((t, idx) => {
+        const div = document.createElement('div');
+        div.className = 'tarefa-anterior';
+        div.dataset.sessao = t.sessao_origem_id;
+        div.dataset.indice = t.indice;
+        div.innerHTML = `
+            <span class="desc"><strong>📌</strong> ${escapeHtml(t.descricao)}</span>
+            <input type="text" placeholder="Digite a avaliação..." class="input-avaliacao" data-idx="${idx}" value="${escapeHtml(t.avaliacao || '')}">
+            <button class="btn-salvar-avaliacao" data-idx="${idx}">💾 Salvar</button>
+            <span class="status-avaliado" style="display:none;">✅ Avaliado</span>
+        `;
+        container.appendChild(div);
+    });
+    document.querySelectorAll('.btn-salvar-avaliacao').forEach(btn => {
+        btn.addEventListener('click', async function() {
+            const idx = parseInt(this.dataset.idx);
+            const t = tarefasAnteriores[idx];
+            const input = document.querySelector(`.input-avaliacao[data-idx="${idx}"]`);
+            const avaliacao = input.value.trim();
+            if (!avaliacao) { showToast('Digite uma avaliação', 'error'); return; }
+            try {
+                await apiFetch('/avaliar_tarefa_anterior', {
+                    method: 'POST',
+                    body: JSON.stringify({ sessao_origem_id: t.sessao_origem_id, indice: t.indice, avaliacao })
+                });
+                t.avaliacao = avaliacao;
+                const statusEl = this.parentElement.querySelector('.status-avaliado');
+                statusEl.style.display = 'inline';
+                this.disabled = true;
+                this.textContent = '✅ Salvo';
+                showToast('Avaliação salva!', 'success');
+                await carregarTarefasAnteriores();
+            } catch (e) {
+                showToast('Erro ao salvar avaliação: ' + e.message, 'error');
+            }
+        });
+    });
+    document.querySelectorAll('.input-avaliacao').forEach(inp => {
+        inp.addEventListener('input', function() {
+            const idx = parseInt(this.dataset.idx);
+            tarefasAnteriores[idx].avaliacao = this.value;
+        });
+    });
+}
 
-    is_casal = data.get('isCasal', False)
-    id_pessoa = data.get('idPessoa')
-    id_casal = data.get('idCasal')
-    if is_casal and not id_casal:
-        return jsonify({'erro': 'Casal não selecionado'}), 400
-    if not is_casal and not id_pessoa:
-        return jsonify({'erro': 'Pessoa não selecionada'}), 400
+// ===== FORMULÁRIO DE SESSÃO =====
+function renderTasks() {
+    const c = document.getElementById('tasksContainer');
+    c.innerHTML = tasksArray.length === 0 ? '<div style="color:#9a8a7a;">Nenhuma tarefa</div>' : '';
+    tasksArray.forEach((task, idx) => {
+        const div = document.createElement('div');
+        div.className = 'task-item';
+        div.innerHTML = `<input type="text" placeholder="Tarefa" value="${escapeHtml(task.descricao)}" data-task-desc="${idx}">
+                         <input type="text" placeholder="Avaliação (opcional)" value="${escapeHtml(task.avaliacao)}" data-task-aval="${idx}">
+                         <button class="remove-task" data-idx="${idx}" class="danger">✖</button>`;
+        c.appendChild(div);
+    });
+    document.querySelectorAll('[data-task-desc]').forEach(inp => inp.addEventListener('input', e => tasksArray[parseInt(inp.dataset.taskDesc)].descricao = inp.value));
+    document.querySelectorAll('[data-task-aval]').forEach(inp => inp.addEventListener('input', e => tasksArray[parseInt(inp.dataset.taskAval)].avaliacao = inp.value));
+    document.querySelectorAll('.remove-task').forEach(btn => btn.addEventListener('click', () => { tasksArray.splice(parseInt(btn.dataset.idx), 1); renderTasks(); }));
+}
+function renderAssuntosNesta() {
+    const c = document.getElementById('assuntosNestaContainer');
+    c.innerHTML = '';
+    if (assuntosNestaArray.length) {
+        const w = document.createElement('div');
+        w.className = 'topic-list';
+        assuntosNestaArray.forEach((t, i) => {
+            const tag = document.createElement('span');
+            tag.className = 'topic-tag';
+            tag.innerHTML = `${escapeHtml(t)} <button class="remove-nesta" data-idx="${i}">✖</button>`;
+            w.appendChild(tag);
+        });
+        c.appendChild(w);
+        document.querySelectorAll('.remove-nesta').forEach(btn => btn.addEventListener('click', () => { assuntosNestaArray.splice(parseInt(btn.dataset.idx), 1); renderAssuntosNesta(); }));
+    } else c.innerHTML = '<div style="color:#9a8a7a;">Nenhum tópico</div>';
+}
+function renderAssuntosProximas() {
+    const c = document.getElementById('assuntosProximasContainer');
+    c.innerHTML = '';
+    if (assuntosProximasArray.length) {
+        const w = document.createElement('div');
+        w.className = 'topic-list';
+        assuntosProximasArray.forEach((t, i) => {
+            const tag = document.createElement('span');
+            tag.className = 'topic-tag';
+            tag.innerHTML = `${escapeHtml(t)} <button class="remove-prox" data-idx="${i}">✖</button>`;
+            w.appendChild(tag);
+        });
+        c.appendChild(w);
+        document.querySelectorAll('.remove-prox').forEach(btn => btn.addEventListener('click', () => { assuntosProximasArray.splice(parseInt(btn.dataset.idx), 1); renderAssuntosProximas(); }));
+    } else c.innerHTML = '<div style="color:#9a8a7a;">Nenhum tópico</div>';
+}
 
-    duracao = data.get('duracao', '')
-    versiculo = data.get('versiculo', '')
-    anotacao = data.get('anotacaoSessao', '')
-    status = data.get('status', 'realizada')
-    tasks = json.dumps(data.get('tasks', []))
-    tarefas_anteriores = json.dumps(data.get('tarefas_anteriores', []))
-    assuntos_nesta = json.dumps(data.get('assuntosNestaSessao', []))
-    assuntos_proximas = json.dumps(data.get('assuntosProximasSessoes', []))
+function resetFormSession(keepSelection = false) {
+    currentEditSessionId = null;
+    if (!keepSelection) {
+        document.getElementById('counselingForm').reset();
+        document.getElementById('casoNum').value = '';
+        document.getElementById('isCasal').checked = false;
+        toggleCasalFields();
+    }
+    tasksArray = [];
+    assuntosNestaArray = [];
+    assuntosProximasArray = [];
+    renderTasks();
+    renderAssuntosNesta();
+    renderAssuntosProximas();
+    document.getElementById('data').value = new Date().toISOString().slice(0, 10);
+    document.getElementById('sessaoStatus').value = 'realizada';
+    document.getElementById('sessaoNum').value = '';
+    if (keepSelection) {
+        carregarTarefasAnteriores();
+    } else {
+        tarefasAnteriores = [];
+        renderTarefasAnteriores();
+    }
+}
+function toggleCasalFields() {
+    const isCasal = document.getElementById('isCasal').checked;
+    document.getElementById('casalBlock').style.display = isCasal ? 'block' : 'none';
+    document.getElementById('individualBlock').style.display = isCasal ? 'none' : 'block';
+    carregarTarefasAnteriores();
+}
+function novaSessao() {
+    resetFormSession(true);
+    document.getElementById('casoNum').value = '';
+    document.getElementById('duracao').value = '';
+    document.getElementById('versiculo').value = '';
+    document.getElementById('anotacaoSessao').value = '';
+    document.getElementById('sessaoNum').value = '';
+    document.getElementById('data').value = new Date().toISOString().slice(0, 10);
+    carregarTarefasAnteriores();
+    showToast('Nova sessão iniciada', 'info');
+}
 
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('''
-        UPDATE sessoes SET
-            data = ?, caso_num = ?, sessao_num = ?, duracao = ?,
-            is_casal = ?, id_pessoa = ?, id_casal = ?,
-            versiculo = ?, anotacao_sessao = ?,
-            tasks = ?, tarefas_anteriores = ?, assuntos_nesta = ?, assuntos_proximas = ?,
-            status = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND conselheiro_id = ?
-    ''', (
-        data_sessao, caso_num, sessao_num, duracao,
-        1 if is_casal else 0, id_pessoa, id_casal,
-        versiculo, anotacao,
-        tasks, tarefas_anteriores, assuntos_nesta, assuntos_proximas,
-        status, id, request.user_id
-    ))
-    db.commit()
-    if cursor.rowcount == 0:
-        return jsonify({'erro': 'Sessão não encontrada'}), 404
-    log_acao(request.user_id, 'atualizar_sessao', f'Sessão {id} atualizada')
-    return jsonify({'atualizado': cursor.rowcount})
+async function salvarSessao(e) {
+    e.preventDefault();
+    const data = document.getElementById('data').value;
+    const casoNum = document.getElementById('casoNum').value.trim();
+    const duracao = document.getElementById('duracao').value;
+    const status = document.getElementById('sessaoStatus').value;
+    const isCasal = document.getElementById('isCasal').checked;
+    let idPessoa = null, idCasal = null;
+    if (isCasal) { idCasal = parseInt(document.getElementById('casalSelect').value); if (!idCasal) { showToast('Selecione um casal', 'error'); return; } }
+    else { idPessoa = parseInt(document.getElementById('pessoaSelect').value); if (!idPessoa) { showToast('Selecione uma pessoa', 'error'); return; } }
+    if (!data || !casoNum) { showToast('Data e caso são obrigatórios', 'error'); return; }
+    const versiculo = document.getElementById('versiculo').value;
+    const anotacaoSessao = document.getElementById('anotacaoSessao').value;
+    const sessaoObj = { data, casoNum, duracao, isCasal, idPessoa, idCasal, versiculo, anotacaoSessao, status, tasks: tasksArray, assuntosNestaSessao: assuntosNestaArray, assuntosProximasSessoes: assuntosProximasArray };
+    try {
+        if (currentEditSessionId) {
+            sessaoObj.sessaoNum = parseInt(document.getElementById('sessaoNum').value);
+            await apiFetch(`/sessoes/${currentEditSessionId}`, { method: 'PUT', body: JSON.stringify(sessaoObj) });
+            showToast('Sessão atualizada!', 'success');
+        } else {
+            const resp = await apiFetch('/sessoes', { method: 'POST', body: JSON.stringify(sessaoObj) });
+            document.getElementById('sessaoNum').value = resp.sessao_num;
+            showToast(`Sessão criada! Nº ${resp.sessao_num}`, 'success');
+        }
+        await carregarDadosIniciais();
+        resetFormSession();
+        if (document.getElementById('tab-consultas').classList.contains('active')) await carregarSessoesPagina(1, true);
+        tarefasAnteriores = [];
+        renderTarefasAnteriores();
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
 
-@app.route('/api/sessoes/<int:id>', methods=['DELETE'])
-@autenticar_token
-def deletar_sessao(id):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('DELETE FROM sessoes WHERE id = ? AND conselheiro_id = ?', (id, request.user_id))
-    db.commit()
-    return jsonify({'deletado': cursor.rowcount})
+async function editarSessao(id) {
+    const sess = sessoesCache.find(s => s.id == id);
+    if (!sess) return;
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelector('.tab-btn[data-tab="sessoes"]').classList.add('active');
+    document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
+    document.getElementById('tab-sessoes').classList.add('active');
+    currentEditSessionId = sess.id;
+    document.getElementById('data').value = sess.data;
+    document.getElementById('casoNum').value = sess.caso_num;
+    document.getElementById('sessaoNum').value = sess.sessao_num;
+    document.getElementById('duracao').value = sess.duracao || '';
+    document.getElementById('versiculo').value = sess.versiculo || '';
+    document.getElementById('anotacaoSessao').value = sess.anotacao_sessao || '';
+    document.getElementById('sessaoStatus').value = sess.status || 'realizada';
+    document.getElementById('isCasal').checked = sess.is_casal;
+    toggleCasalFields();
+    if (sess.is_casal) document.getElementById('casalSelect').value = sess.id_casal || '';
+    else document.getElementById('pessoaSelect').value = sess.id_pessoa || '';
+    tasksArray = sess.tasks ? [...sess.tasks] : [];
+    assuntosNestaArray = sess.assuntosNestaSessao ? [...sess.assuntosNestaSessao] : [];
+    assuntosProximasArray = sess.assuntosProximasSessoes ? [...sess.assuntosProximasSessoes] : [];
+    renderTasks();
+    renderAssuntosNesta();
+    renderAssuntosProximas();
+    tarefasAnteriores = sess.tarefas_anteriores ? sess.tarefas_anteriores.map(t => ({ ...t, avaliacao: '' })) : [];
+    renderTarefasAnteriores();
+    if (!tarefasAnteriores.length) await carregarTarefasAnteriores();
+    document.getElementById('counselingForm').scrollIntoView({ behavior: 'smooth' });
+}
 
-# ===== ÚLTIMA SESSÃO (tarefas pendentes) =====
-@app.route('/api/ultima_sessao', methods=['GET'])
-@autenticar_token
-def ultima_sessao():
-    pessoa_id = request.args.get('pessoa_id', type=int)
-    casal_id = request.args.get('casal_id', type=int)
-    if not pessoa_id and not casal_id:
-        return jsonify({'erro': 'Informe pessoa_id ou casal_id'}), 400
-
-    db = get_db()
-    cursor = db.cursor()
-    if pessoa_id:
-        cursor.execute('''
-            SELECT id, caso_num, tasks FROM sessoes
-            WHERE conselheiro_id = ? AND id_pessoa = ?
-            ORDER BY sessao_num DESC LIMIT 1
-        ''', (request.user_id, pessoa_id))
-    else:
-        cursor.execute('''
-            SELECT id, caso_num, tasks FROM sessoes
-            WHERE conselheiro_id = ? AND id_casal = ?
-            ORDER BY sessao_num DESC LIMIT 1
-        ''', (request.user_id, casal_id))
-
-    row = cursor.fetchone()
-    if not row:
-        return jsonify({'tarefas': []})
-
-    tasks = json.loads(row['tasks'] or '[]')
-    pendentes = []
-    for idx, t in enumerate(tasks):
-        if not t.get('avaliacao', '').strip():
-            pendentes.append({
-                'sessao_origem_id': row['id'],
-                'indice': idx,
-                'descricao': t.get('descricao', '')
+// ===== AVALIAÇÃO (MODAL) =====
+function abrirAvaliacao(sessionId) {
+    const sess = sessoesCache.find(s => s.id == sessionId);
+    if (!sess) return;
+    currentAvaliacaoSessionId = sessionId;
+    const c = document.getElementById('modalTasksList');
+    c.innerHTML = '';
+    if (!sess.tasks || !sess.tasks.length) { c.innerHTML = '<p style="text-align:center;">Nenhuma tarefa.</p>'; }
+    else {
+        sess.tasks.forEach((task, idx) => {
+            const div = document.createElement('div');
+            div.className = 'modal-task-item';
+            div.innerHTML = `<label>📌 Tarefa:</label><div class="task-desc">${escapeHtml(task.descricao)}</div><label>✍️ Avaliação:</label><textarea data-task-idx="${idx}" rows="2">${escapeHtml(task.avaliacao || '')}</textarea>`;
+            c.appendChild(div);
+        });
+    }
+    document.getElementById('avaliacaoModal').classList.add('active');
+}
+async function salvarAvaliacoes() {
+    if (!currentAvaliacaoSessionId) return;
+    const sess = sessoesCache.find(s => s.id == currentAvaliacaoSessionId);
+    if (!sess) return;
+    const tas = document.querySelectorAll('#modalTasksList textarea');
+    if (tas.length && sess.tasks) {
+        tas.forEach(ta => { const idx = parseInt(ta.dataset.taskIdx); if (!isNaN(idx) && sess.tasks[idx]) sess.tasks[idx].avaliacao = ta.value; });
+    }
+    try {
+        await apiFetch(`/sessoes/${currentAvaliacaoSessionId}`, {
+            method: 'PUT',
+            body: JSON.stringify({
+                data: sess.data, casoNum: sess.caso_num, sessaoNum: sess.sessao_num,
+                duracao: sess.duracao, isCasal: sess.is_casal, idPessoa: sess.id_pessoa,
+                idCasal: sess.id_casal, versiculo: sess.versiculo, anotacaoSessao: sess.anotacao_sessao,
+                status: sess.status,
+                tasks: sess.tasks, assuntosNestaSessao: sess.assuntosNestaSessao,
+                assuntosProximasSessoes: sess.assuntosProximasSessoes,
+                tarefas_anteriores: sess.tarefas_anteriores || []
             })
-    return jsonify({'tarefas': pendentes})
+        });
+        await carregarDadosIniciais();
+        document.getElementById('avaliacaoModal').classList.remove('active');
+        showToast('Avaliações salvas!', 'success');
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
+async function abrirAvaliacaoAnterior(sessaoId, indice) {
+    const avaliacao = prompt('Digite a avaliação para a tarefa:');
+    if (avaliacao === null) return;
+    try {
+        await apiFetch('/avaliar_tarefa_anterior', {
+            method: 'POST',
+            body: JSON.stringify({ sessao_origem_id: sessaoId, indice, avaliacao })
+        });
+        await carregarDadosIniciais();
+        showToast('Avaliação salva!', 'success');
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
 
-# ===== AVALIAR TAREFA ANTERIOR =====
-@app.route('/api/avaliar_tarefa_anterior', methods=['POST'])
-@autenticar_token
-def avaliar_tarefa_anterior():
-    data = request.json
-    sessao_origem_id = data.get('sessao_origem_id')
-    indice = data.get('indice')
-    avaliacao = data.get('avaliacao', '')
+// ===== ANEXOS =====
+async function abrirAnexos(sessaoId) {
+    currentAnexosSessaoId = sessaoId;
+    const c = document.getElementById('anexosList');
+    c.innerHTML = '<div class="spinner"></div>';
+    document.getElementById('anexosModal').classList.add('active');
+    try {
+        const data = await apiFetch(`/anexos/${sessaoId}`);
+        c.innerHTML = '';
+        if (!data.length) { c.innerHTML = '<div class="empty-msg">Nenhum anexo.</div>'; }
+        else {
+            data.forEach(a => {
+                const div = document.createElement('div');
+                div.className = 'lista-item';
+                div.innerHTML = `<div><strong>${escapeHtml(a.nome_original)}</strong> <small>${new Date(a.created_at).toLocaleDateString()}</small></div>
+                                 <div style="display:flex;gap:0.5rem;"><a href="${API_BASE}/anexos/download/${a.id}" target="_blank" class="secondary" style="text-decoration:none;padding:0.3rem 0.8rem;border-radius:40px;background:#e8dfd5;">⬇️ Baixar</a><button class="delete-anexo" data-id="${a.id}" class="danger">🗑️</button></div>`;
+                c.appendChild(div);
+            });
+            document.querySelectorAll('.delete-anexo').forEach(btn => btn.addEventListener('click', async () => {
+                if (confirm('Excluir anexo?')) {
+                    try { await apiFetch(`/anexos/${btn.dataset.id}`, { method: 'DELETE' }); await abrirAnexos(currentAnexosSessaoId); showToast('Anexo excluído', 'success'); } catch (e) { showToast(e.message, 'error'); }
+                }
+            }));
+        }
+    } catch (e) {
+        c.innerHTML = `<div class="empty-msg">Erro: ${e.message}</div>`;
+    }
+}
+async function uploadAnexo() {
+    const input = document.getElementById('anexoFileInput');
+    if (!input.files.length) return showToast('Selecione um arquivo', 'error');
+    const file = input.files[0];
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+        const resp = await fetch(`${API_BASE}/anexos/${currentAnexosSessaoId}`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}` },
+            body: fd
+        });
+        if (!resp.ok) { const err = await resp.json(); throw new Error(err.erro || 'Erro'); }
+        await abrirAnexos(currentAnexosSessaoId);
+        input.value = '';
+        showToast('Arquivo enviado!', 'success');
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
 
-    if sessao_origem_id is None or indice is None:
-        return jsonify({'erro': 'Parâmetros inválidos'}), 400
+// ===== EXPORTAÇÕES =====
+function exportCSV(lista, nome = 'sessoes.csv') {
+    if (!lista.length) return showToast('Nenhuma sessão', 'error');
+    const headers = ['Data', 'Caso', 'Sessão', 'Duração', 'Tipo', 'Aconselhado', 'Versículo', 'Anotação', 'Tarefas', 'Assuntos Nesta', 'Assuntos Próx', 'Status'];
+    const rows = lista.map(s => {
+        const aconselhado = s.is_casal ? getCasalNome(s.id_casal) : getPessoaNome(s.id_pessoa);
+        const tasksStr = s.tasks.map(t => `${t.descricao} [${t.avaliacao}]`).join('; ');
+        return [s.data, s.caso_num, s.sessao_num, s.duracao || '', s.is_casal ? 'Casal' : 'Individual', aconselhado, s.versiculo || '', s.anotacao_sessao || '', tasksStr, (s.assuntosNestaSessao || []).join(', '), (s.assuntosProximasSessoes || []).join(', '), s.status || 'realizada'];
+    });
+    const csv = [headers, ...rows].map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob(["\uFEFF" + csv], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = nome;
+    a.click();
+    URL.revokeObjectURL(a.href);
+}
+async function exportExcel() {
+    try {
+        const resp = await fetch(`${API_BASE}/exportar/excel`, { headers: { 'Authorization': `Bearer ${token}` } });
+        if (!resp.ok) throw new Error('Erro');
+        const blob = await resp.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'sessoes.xlsx';
+        a.click();
+        URL.revokeObjectURL(a.href);
+        showToast('Excel exportado!', 'success');
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
+async function exportPDF() {
+    if (!sessoesCache.length) return showToast('Nenhuma sessão', 'error');
+    // Usa html2canvas + jsPDF (carregados dinamicamente)
+    try {
+        await Promise.all([
+            loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js'),
+            loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js')
+        ]);
+        const el = document.createElement('div');
+        el.style.background = 'white';
+        el.style.padding = '20px';
+        el.style.fontFamily = 'Inter, sans-serif';
+        el.innerHTML = `<h2>Relatório de Sessões</h2><p>${new Date().toLocaleString()}</p><hr/>`;
+        sessoesCache.forEach(s => {
+            const aconselhado = s.is_casal ? getCasalNome(s.id_casal) : getPessoaNome(s.id_pessoa);
+            let tasksHtml = '<ul>' + (s.tasks || []).map(t => `<li>${escapeHtml(t.descricao)} — <strong>Avaliação:</strong> ${escapeHtml(t.avaliacao)}</li>`).join('') + '</ul>';
+            let assuntosProxHtml = '<ul>' + (s.assuntosProximasSessoes || []).map(a => `<li>${escapeHtml(a)}</li>`).join('') + '</ul>';
+            el.innerHTML += `<div style="margin-bottom:20px;"><strong>${formatDateBR(s.data)} - Caso ${s.caso_num} Sessão ${s.sessao_num}</strong><br>Aconselhado: ${aconselhado}<br>Versículo: ${s.versiculo || '—'}<br>Anotação: ${s.anotacao_sessao || '—'}<br><strong>Tarefas:</strong> ${tasksHtml}<br>Assuntos tratados: ${(s.assuntosNestaSessao || []).join(', ') || '—'}<br><strong>📌 Próximos assuntos:</strong> ${assuntosProxHtml}<hr></div>`;
+        });
+        document.body.appendChild(el);
+        const canvas = await html2canvas(el, { scale: 2 });
+        document.body.removeChild(el);
+        const imgData = canvas.toDataURL('image/png');
+        const { jsPDF } = window.jspdf;
+        const pdf = new jsPDF('p', 'mm', 'a4');
+        const imgW = 190, imgH = canvas.height * imgW / canvas.width;
+        pdf.addImage(imgData, 'PNG', 10, 10, imgW, imgH);
+        pdf.save('sessoes.pdf');
+        showToast('PDF gerado!', 'success');
+    } catch (e) {
+        showToast('Erro ao gerar PDF: ' + e.message, 'error');
+    }
+}
+function loadScript(src) {
+    return new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = src;
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+    });
+}
 
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT tasks FROM sessoes WHERE id = ? AND conselheiro_id = ?', (sessao_origem_id, request.user_id))
-    row = cursor.fetchone()
-    if not row:
-        return jsonify({'erro': 'Sessão não encontrada'}), 404
+// ===== FILTROS =====
+async function aplicarFiltros() { currentPage = 1; await carregarSessoesPagina(1, true); }
+function limparFiltros() {
+    document.getElementById('filtroNome').value = '';
+    document.getElementById('filtroStatus').value = '';
+    document.getElementById('filtroDataInicio').value = '';
+    document.getElementById('filtroDataFim').value = '';
+    document.getElementById('filtroAssunto').value = '';
+    aplicarFiltros();
+}
 
-    tasks = json.loads(row['tasks'] or '[]')
-    if indice >= len(tasks):
-        return jsonify({'erro': 'Índice inválido'}), 400
+// ===== CONFIGURAÇÕES =====
+async function carregarConfiguracoes() {
+    try {
+        const data = await apiFetch('/configuracoes');
+        document.getElementById('corPrimaria').value = data.cor_primaria || '#b58b4b';
+        document.getElementById('corSecundaria').value = data.cor_secundaria || '#2d6a4f';
+        document.getElementById('corFundo').value = data.cor_fundo || '#f5f1eb';
+        document.getElementById('corTexto').value = data.cor_texto || '#2e2b28';
+        document.getElementById('nomeIgreja').value = data.nome_igreja || 'Igreja Batista';
+        document.getElementById('logoUrl').value = data.logo_url || '';
+        aplicarTema();
+    } catch (e) { console.error('Erro ao carregar config:', e); }
+}
+function aplicarTema() {
+    const root = document.documentElement;
+    const p = document.getElementById('corPrimaria').value;
+    const s = document.getElementById('corSecundaria').value;
+    const b = document.getElementById('corFundo').value;
+    const t = document.getElementById('corTexto').value;
+    const nome = document.getElementById('nomeIgreja').value;
+    const logo = document.getElementById('logoUrl').value;
+    root.style.setProperty('--primary', p);
+    root.style.setProperty('--secondary', s);
+    root.style.setProperty('--bg', b);
+    root.style.setProperty('--text', t);
+    document.getElementById('appTitle').textContent = logo ? `${nome}` : '🕊️ Aconselhamento Bíblico';
+}
+async function salvarConfiguracoes(e) {
+    e.preventDefault();
+    const data = {
+        cor_primaria: document.getElementById('corPrimaria').value,
+        cor_secundaria: document.getElementById('corSecundaria').value,
+        cor_fundo: document.getElementById('corFundo').value,
+        cor_texto: document.getElementById('corTexto').value,
+        nome_igreja: document.getElementById('nomeIgreja').value,
+        logo_url: document.getElementById('logoUrl').value
+    };
+    try {
+        await apiFetch('/configuracoes', { method: 'POST', body: JSON.stringify(data) });
+        aplicarTema();
+        showToast('Configurações salvas!', 'success');
+    } catch (e) { showToast(e.message, 'error'); }
+}
+function resetConfig() {
+    document.getElementById('corPrimaria').value = '#b58b4b';
+    document.getElementById('corSecundaria').value = '#2d6a4f';
+    document.getElementById('corFundo').value = '#f5f1eb';
+    document.getElementById('corTexto').value = '#2e2b28';
+    document.getElementById('nomeIgreja').value = 'Igreja Batista';
+    document.getElementById('logoUrl').value = '';
+    aplicarTema();
+    showToast('Configurações restauradas!', 'info');
+}
 
-    tasks[indice]['avaliacao'] = avaliacao
-    cursor.execute('UPDATE sessoes SET tasks = ? WHERE id = ?', (json.dumps(tasks), sessao_origem_id))
-    db.commit()
-    log_acao(request.user_id, 'avaliar_tarefa', f'Tarefa {indice} da sessão {sessao_origem_id} avaliada')
-    return jsonify({'mensagem': 'Avaliação salva'})
+// ===== RELATÓRIOS =====
+async function relTarefasPendentes() {
+    try {
+        const data = await apiFetch('/relatorios/tarefas-pendentes');
+        const c = document.getElementById('relTarefasPendentes');
+        if (!data.length) { c.innerHTML = '<p>Nenhuma tarefa pendente.</p>'; return; }
+        let html = '<ul>';
+        data.forEach(s => {
+            html += `<li><strong>Caso ${s.caso} - Sessão ${s.sessao}</strong> (${formatDateBR(s.data)}):<ul>`;
+            s.tarefas_pendentes.forEach(t => html += `<li>${escapeHtml(t.descricao)}</li>`);
+            html += '</ul></li>';
+        });
+        html += '</ul>';
+        c.innerHTML = html;
+    } catch (e) { showToast(e.message, 'error'); }
+}
+async function relPeriodo() {
+    const inicio = document.getElementById('relPeriodoInicio').value;
+    const fim = document.getElementById('relPeriodoFim').value;
+    if (!inicio || !fim) return showToast('Selecione as datas', 'error');
+    try {
+        const data = await apiFetch(`/relatorios/sessoes-por-periodo?data_inicio=${inicio}&data_fim=${fim}`);
+        const c = document.getElementById('relPeriodoResultado');
+        if (!data.length) { c.innerHTML = '<p>Nenhuma sessão no período.</p>'; return; }
+        let html = '<table style="width:100%;border-collapse:collapse;margin-top:0.5rem;"><tr><th style="text-align:left;border-bottom:2px solid var(--primary);padding:0.3rem;">Data</th><th style="text-align:left;border-bottom:2px solid var(--primary);padding:0.3rem;">Caso</th><th style="text-align:left;border-bottom:2px solid var(--primary);padding:0.3rem;">Sessão</th><th style="text-align:left;border-bottom:2px solid var(--primary);padding:0.3rem;">Status</th></tr>';
+        data.forEach(s => {
+            html += `<tr><td style="padding:0.3rem;">${formatDateBR(s.data)}</td><td style="padding:0.3rem;">${s.caso_num}</td><td style="padding:0.3rem;">${s.sessao_num}</td><td style="padding:0.3rem;">${s.status || 'realizada'}</td></tr>`;
+        });
+        html += '</table>';
+        c.innerHTML = html;
+    } catch (e) { showToast(e.message, 'error'); }
+}
+async function relPessoas() {
+    try {
+        const data = await apiFetch('/relatorios/pessoas-atendidas');
+        const c = document.getElementById('relPessoas');
+        if (!data.length) { c.innerHTML = '<p>Nenhuma pessoa atendida.</p>'; return; }
+        let html = '<table style="width:100%;border-collapse:collapse;margin-top:0.5rem;"><tr><th style="text-align:left;border-bottom:2px solid var(--primary);padding:0.3rem;">Nome</th><th style="text-align:left;border-bottom:2px solid var(--primary);padding:0.3rem;">Sessões</th></tr>';
+        data.forEach(p => {
+            html += `<tr><td style="padding:0.3rem;">${escapeHtml(p.nome)}</td><td style="padding:0.3rem;">${p.total_sessoes}</td></tr>`;
+        });
+        html += '</table>';
+        c.innerHTML = html;
+    } catch (e) { showToast(e.message, 'error'); }
+}
 
-# ===== ANEXOS =====
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+// ===== BACKUP =====
+async function downloadBackup() {
+    try {
+        const resp = await fetch(`${API_BASE}/backup`, { headers: { 'Authorization': `Bearer ${token}` } });
+        if (!resp.ok) throw new Error('Erro no backup');
+        const blob = await resp.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `backup_${new Date().toISOString().slice(0,10)}.db`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        showToast('Backup baixado!', 'success');
+    } catch (e) { showToast(e.message, 'error'); }
+}
 
-@app.route('/api/anexos/<int:sessao_id>', methods=['POST'])
-@autenticar_token
-def upload_anexo(sessao_id):
-    if 'file' not in request.files:
-        return jsonify({'erro': 'Nenhum arquivo enviado'}), 400
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'erro': 'Nome de arquivo vazio'}), 400
-    if not allowed_file(file.filename):
-        return jsonify({'erro': 'Tipo de arquivo não permitido'}), 400
+// ===== INICIALIZAÇÃO =====
+document.addEventListener('DOMContentLoaded', function() {
+    document.getElementById('btnLogin').addEventListener('click', fazerLogin);
+    document.getElementById('btnMostrarRegistro').addEventListener('click', mostrarRegistro);
+    document.getElementById('btnRegistrar').addEventListener('click', registrar);
+    document.getElementById('btnVoltarLogin').addEventListener('click', mostrarLogin);
+    document.getElementById('logoutBtn').addEventListener('click', fazerLogout);
+    document.getElementById('counselingForm').addEventListener('submit', salvarSessao);
+    document.getElementById('cancelEditBtn').addEventListener('click', () => resetFormSession(false));
+    document.getElementById('btnNovaSessao').addEventListener('click', novaSessao);
+    document.getElementById('btnCarregarTarefas').addEventListener('click', carregarTarefasAnteriores);
+    document.getElementById('addTaskBtn').addEventListener('click', () => { if (tasksArray.length < 6) tasksArray.push({ descricao: '', avaliacao: '' }); else showToast('Máx 6', 'error'); renderTasks(); });
+    document.getElementById('addAssuntoNestaBtn').addEventListener('click', () => { const v = document.getElementById('novoAssuntoNesta').value.trim(); if (v) { assuntosNestaArray.push(v); renderAssuntosNesta(); document.getElementById('novoAssuntoNesta').value = ''; } });
+    document.getElementById('addAssuntoProximaBtn').addEventListener('click', () => { const v = document.getElementById('novoAssuntoProxima').value.trim(); if (v) { assuntosProximasArray.push(v); renderAssuntosProximas(); document.getElementById('novoAssuntoProxima').value = ''; } });
+    document.getElementById('isCasal').addEventListener('change', toggleCasalFields);
+    document.getElementById('pessoaSelect').addEventListener('change', carregarTarefasAnteriores);
+    document.getElementById('casalSelect').addEventListener('change', carregarTarefasAnteriores);
 
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT id FROM sessoes WHERE id = ? AND conselheiro_id = ?', (sessao_id, request.user_id))
-    if not cursor.fetchone():
-        return jsonify({'erro': 'Sessão não encontrada'}), 404
+    document.getElementById('addPessoaBtn').addEventListener('click', async () => {
+        const nome = document.getElementById('novaPessoaNome').value.trim();
+        if (!nome) return showToast('Nome obrigatório', 'error');
+        const obs = document.getElementById('novaPessoaObs').value;
+        try { await apiFetch('/pessoas', { method: 'POST', body: JSON.stringify({ nome, obs }) }); await carregarDadosIniciais(); document.getElementById('novaPessoaNome').value = ''; document.getElementById('novaPessoaObs').value = ''; showToast('Pessoa adicionada!', 'success'); } catch (e) { showToast(e.message, 'error'); }
+    });
+    document.getElementById('addCasalBtn').addEventListener('click', async () => {
+        const idHomem = parseInt(document.getElementById('casalHomemSelect').value);
+        const idMulher = parseInt(document.getElementById('casalMulherSelect').value);
+        if (!idHomem || !idMulher) return showToast('Selecione marido e esposa', 'error');
+        const nome_casal = document.getElementById('novoCasalNome').value.trim();
+        try { await apiFetch('/casais', { method: 'POST', body: JSON.stringify({ nome_casal, id_homem: idHomem, id_mulher: idMulher }) }); await carregarDadosIniciais(); document.getElementById('novoCasalNome').value = ''; showToast('Casal adicionado!', 'success'); } catch (e) { showToast(e.message, 'error'); }
+    });
+    document.getElementById('addLembreteBtn').addEventListener('click', async () => {
+        const titulo = document.getElementById('novoLembreteTitulo').value.trim();
+        const descricao = document.getElementById('novoLembreteDescricao').value.trim();
+        const data_lembrete = document.getElementById('novoLembreteData').value;
+        const sessao_id = document.getElementById('novoLembreteSessao').value ? parseInt(document.getElementById('novoLembreteSessao').value) : null;
+        if (!titulo || !data_lembrete) return showToast('Título e data obrigatórios', 'error');
+        try { await apiFetch('/lembretes', { method: 'POST', body: JSON.stringify({ titulo, descricao, data_lembrete, sessao_id }) }); await carregarDadosIniciais(); document.getElementById('novoLembreteTitulo').value = ''; document.getElementById('novoLembreteDescricao').value = ''; document.getElementById('novoLembreteData').value = ''; document.getElementById('novoLembreteSessao').value = ''; showToast('Lembrete criado!', 'success'); } catch (e) { showToast(e.message, 'error'); }
+    });
 
-    filename = secure_filename(file.filename)
-    unique_name = f"{secrets.token_hex(8)}_{filename}"
-    filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_name)
-    file.save(filepath)
+    document.getElementById('exportCSVBtn').addEventListener('click', () => exportCSV(sessoesCache, 'todas_sessoes.csv'));
+    document.getElementById('exportPDFBtn').addEventListener('click', exportPDF);
+    document.getElementById('exportExcelBtn').addEventListener('click', exportExcel);
+    document.getElementById('aplicarFiltrosBtn').addEventListener('click', aplicarFiltros);
+    document.getElementById('limparFiltrosBtn').addEventListener('click', limparFiltros);
+    document.getElementById('carregarMaisBtn').addEventListener('click', () => { if (currentPage < totalPages) carregarSessoesPagina(currentPage + 1, false); });
+    document.getElementById('closeModalBtn').addEventListener('click', () => document.getElementById('avaliacaoModal').classList.remove('active'));
+    document.getElementById('saveAvaliacaoBtn').addEventListener('click', salvarAvaliacoes);
+    document.getElementById('closeAnexosModalBtn').addEventListener('click', () => document.getElementById('anexosModal').classList.remove('active'));
+    document.getElementById('uploadAnexoBtn').addEventListener('click', uploadAnexo);
+    document.getElementById('btnBackup').addEventListener('click', downloadBackup);
+    document.getElementById('btnRelTarefasPendentes').addEventListener('click', relTarefasPendentes);
+    document.getElementById('btnRelPeriodo').addEventListener('click', relPeriodo);
+    document.getElementById('btnRelPessoas').addEventListener('click', relPessoas);
+    document.getElementById('configForm').addEventListener('submit', salvarConfiguracoes);
+    document.getElementById('btnResetConfig').addEventListener('click', resetConfig);
+    document.querySelectorAll('#corPrimaria,#corSecundaria,#corFundo,#corTexto,#logoUrl,#nomeIgreja').forEach(el => el.addEventListener('input', aplicarTema));
 
-    cursor.execute(
-        'INSERT INTO anexos (sessao_id, conselheiro_id, nome_original, nome_arquivo, caminho) VALUES (?, ?, ?, ?, ?)',
-        (sessao_id, request.user_id, filename, unique_name, filepath)
-    )
-    db.commit()
-    log_acao(request.user_id, 'upload_anexo', f'Anexo {filename} para sessão {sessao_id}')
-    return jsonify({'id': cursor.lastrowid, 'mensagem': 'Arquivo enviado'}), 201
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            const tab = btn.dataset.tab;
+            document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
+            document.getElementById(`tab-${tab}`).classList.add('active');
+            if (tab === 'consultas') carregarSessoesPagina(1, true);
+            if (tab === 'lembretes') renderLembretes();
+        });
+    });
+    document.querySelectorAll('.modal').forEach(modal => {
+        modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('active'); });
+    });
 
-@app.route('/api/anexos/<int:sessao_id>', methods=['GET'])
-@autenticar_token
-def listar_anexos(sessao_id):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT * FROM anexos WHERE sessao_id = ? AND conselheiro_id = ?', (sessao_id, request.user_id))
-    rows = cursor.fetchall()
-    return jsonify([dict(row) for row in rows])
-
-@app.route('/api/anexos/<int:anexo_id>', methods=['DELETE'])
-@autenticar_token
-def deletar_anexo(anexo_id):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT caminho FROM anexos WHERE id = ? AND conselheiro_id = ?', (anexo_id, request.user_id))
-    row = cursor.fetchone()
-    if not row:
-        return jsonify({'erro': 'Anexo não encontrado'}), 404
-    filepath = row['caminho']
-    if os.path.exists(filepath):
-        os.remove(filepath)
-    cursor.execute('DELETE FROM anexos WHERE id = ?', (anexo_id,))
-    db.commit()
-    log_acao(request.user_id, 'deletar_anexo', f'Anexo {anexo_id} removido')
-    return jsonify({'deletado': 1})
-
-@app.route('/api/anexos/download/<int:anexo_id>', methods=['GET'])
-@autenticar_token
-def download_anexo(anexo_id):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT nome_original, caminho FROM anexos WHERE id = ? AND conselheiro_id = ?', (anexo_id, request.user_id))
-    row = cursor.fetchone()
-    if not row:
-        return jsonify({'erro': 'Anexo não encontrado'}), 404
-    return send_file(row['caminho'], download_name=row['nome_original'])
-
-# ===== LEMBRETES =====
-@app.route('/api/lembretes', methods=['GET'])
-@autenticar_token
-def listar_lembretes():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT * FROM lembretes WHERE conselheiro_id = ? ORDER BY data_lembrete', (request.user_id,))
-    rows = cursor.fetchall()
-    return jsonify([dict(row) for row in rows])
-
-@app.route('/api/lembretes', methods=['POST'])
-@autenticar_token
-def criar_lembrete():
-    data = request.json
-    titulo = data.get('titulo')
-    descricao = data.get('descricao', '')
-    data_lembrete = data.get('data_lembrete')
-    sessao_id = data.get('sessao_id')
-    if not titulo or not data_lembrete:
-        return jsonify({'erro': 'Título e data são obrigatórios'}), 400
-    db = get_db()
-    cursor = db.cursor()
-    if sessao_id:
-        cursor.execute('SELECT id FROM sessoes WHERE id = ? AND conselheiro_id = ?', (sessao_id, request.user_id))
-        if not cursor.fetchone():
-            return jsonify({'erro': 'Sessão não encontrada'}), 404
-    cursor.execute(
-        'INSERT INTO lembretes (conselheiro_id, sessao_id, titulo, descricao, data_lembrete) VALUES (?, ?, ?, ?, ?)',
-        (request.user_id, sessao_id, titulo, descricao, data_lembrete)
-    )
-    db.commit()
-    log_acao(request.user_id, 'criar_lembrete', f'Lembrete {titulo}')
-    return jsonify({'id': cursor.lastrowid}), 201
-
-@app.route('/api/lembretes/<int:id>', methods=['PUT'])
-@autenticar_token
-def atualizar_lembrete(id):
-    data = request.json
-    concluido = data.get('concluido', 0)
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute(
-        'UPDATE lembretes SET concluido = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND conselheiro_id = ?',
-        (concluido, id, request.user_id)
-    )
-    db.commit()
-    return jsonify({'atualizado': cursor.rowcount})
-
-@app.route('/api/lembretes/<int:id>', methods=['DELETE'])
-@autenticar_token
-def deletar_lembrete(id):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('DELETE FROM lembretes WHERE id = ? AND conselheiro_id = ?', (id, request.user_id))
-    db.commit()
-    return jsonify({'deletado': cursor.rowcount})
-
-# ===== ESTATÍSTICAS =====
-@app.route('/api/estatisticas', methods=['GET'])
-@autenticar_token
-def estatisticas():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT COUNT(*) as total FROM sessoes WHERE conselheiro_id = ?', (request.user_id,))
-    total_sessoes = cursor.fetchone()['total']
-    cursor.execute('SELECT COUNT(*) as total FROM pessoas WHERE conselheiro_id = ?', (request.user_id,))
-    total_pessoas = cursor.fetchone()['total']
-    cursor.execute('SELECT COUNT(*) as total FROM casais WHERE conselheiro_id = ?', (request.user_id,))
-    total_casais = cursor.fetchone()['total']
-    cursor.execute('''
-        SELECT COUNT(*) as total FROM sessoes, json_each(sessoes.tasks) as task
-        WHERE sessoes.conselheiro_id = ? AND json_extract(task.value, '$.avaliacao') IS NULL
-    ''', (request.user_id,))
-    tarefas_pendentes = cursor.fetchone()['total']
-    cursor.execute('SELECT COUNT(*) as total FROM lembretes WHERE conselheiro_id = ? AND concluido = 0', (request.user_id,))
-    lembretes_pendentes = cursor.fetchone()['total']
-    cursor.execute('''
-        SELECT strftime('%Y-%m', data) as mes, COUNT(*) as total
-        FROM sessoes
-        WHERE conselheiro_id = ? AND data >= date('now', '-12 months')
-        GROUP BY mes
-        ORDER BY mes
-    ''', (request.user_id,))
-    sessoes_por_mes = [{'mes': row['mes'], 'total': row['total']} for row in cursor.fetchall()]
-    return jsonify({
-        'total_sessoes': total_sessoes,
-        'total_pessoas': total_pessoas,
-        'total_casais': total_casais,
-        'tarefas_pendentes': tarefas_pendentes,
-        'lembretes_pendentes': lembretes_pendentes,
-        'sessoes_por_mes': sessoes_por_mes
-    })
-
-# ===== RELATÓRIOS =====
-@app.route('/api/relatorios/tarefas-pendentes', methods=['GET'])
-@autenticar_token
-def relatorio_tarefas_pendentes():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('''
-        SELECT id, caso_num, sessao_num, data, tasks FROM sessoes
-        WHERE conselheiro_id = ? AND tasks IS NOT NULL AND tasks != '[]'
-        ORDER BY data DESC
-    ''', (request.user_id,))
-    rows = cursor.fetchall()
-    resultado = []
-    for row in rows:
-        tasks = json.loads(row['tasks'] or '[]')
-        pendentes = [{'descricao': t.get('descricao', ''), 'avaliacao': t.get('avaliacao', '')}
-                     for t in tasks if not t.get('avaliacao', '').strip()]
-        if pendentes:
-            resultado.append({
-                'sessao_id': row['id'],
-                'caso': row['caso_num'],
-                'sessao': row['sessao_num'],
-                'data': row['data'],
-                'tarefas_pendentes': pendentes
-            })
-    return jsonify(resultado)
-
-@app.route('/api/relatorios/sessoes-por-periodo', methods=['GET'])
-@autenticar_token
-def relatorio_sessoes_periodo():
-    data_inicio = request.args.get('data_inicio')
-    data_fim = request.args.get('data_fim')
-    if not data_inicio or not data_fim:
-        return jsonify({'erro': 'Informe data_inicio e data_fim'}), 400
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('''
-        SELECT * FROM sessoes
-        WHERE conselheiro_id = ? AND data BETWEEN ? AND ?
-        ORDER BY data DESC
-    ''', (request.user_id, data_inicio, data_fim))
-    rows = cursor.fetchall()
-    resultado = []
-    for row in rows:
-        d = dict(row)
-        d['is_casal'] = bool(d['is_casal'])
-        d['tasks'] = json.loads(d['tasks'] or '[]')
-        d['tarefas_anteriores'] = json.loads(d['tarefas_anteriores'] or '[]')
-        d['assuntosNestaSessao'] = json.loads(d['assuntos_nesta'] or '[]')
-        d['assuntosProximasSessoes'] = json.loads(d['assuntos_proximas'] or '[]')
-        del d['assuntos_nesta']
-        del d['assuntos_proximas']
-        resultado.append(d)
-    return jsonify(resultado)
-
-@app.route('/api/relatorios/pessoas-atendidas', methods=['GET'])
-@autenticar_token
-def relatorio_pessoas_atendidas():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('''
-        SELECT DISTINCT p.id, p.nome, p.obs,
-            (SELECT COUNT(*) FROM sessoes WHERE sessoes.id_pessoa = p.id AND sessoes.conselheiro_id = ?) as total_sessoes
-        FROM pessoas p
-        WHERE p.conselheiro_id = ?
-        ORDER BY total_sessoes DESC
-    ''', (request.user_id, request.user_id))
-    rows = cursor.fetchall()
-    return jsonify([dict(row) for row in rows])
-
-# ===== EXPORTAÇÃO EXCEL =====
-@app.route('/api/exportar/excel', methods=['GET'])
-@autenticar_token
-def exportar_excel():
-    db = get_db()
-    cursor = db.cursor()
-    data_inicio = request.args.get('data_inicio')
-    data_fim = request.args.get('data_fim')
-    query = 'SELECT * FROM sessoes WHERE conselheiro_id = ?'
-    params = [request.user_id]
-    if data_inicio:
-        query += ' AND data >= ?'
-        params.append(data_inicio)
-    if data_fim:
-        query += ' AND data <= ?'
-        params.append(data_fim)
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = 'Sessões'
-    headers = ['ID', 'Data', 'Caso', 'Sessão', 'Duração', 'Tipo', 'Pessoa/Casal', 'Versículo', 'Anotação', 'Tarefas', 'Assuntos Nesta', 'Assuntos Próx', 'Status']
-    ws.append(headers)
-    for col in range(1, len(headers)+1):
-        cell = ws.cell(row=1, column=col)
-        cell.font = Font(bold=True)
-        cell.fill = PatternFill(start_color="DDDDDD", end_color="DDDDDD", fill_type="solid")
-        cell.alignment = Alignment(horizontal='center')
-
-    for row in rows:
-        tipo = 'Casal' if row['is_casal'] else 'Individual'
-        pessoa_casal = ''
-        if row['is_casal']:
-            cursor.execute('SELECT nome_casal FROM casais WHERE id = ?', (row['id_casal'],))
-            c = cursor.fetchone()
-            pessoa_casal = c['nome_casal'] if c else ''
-        else:
-            cursor.execute('SELECT nome FROM pessoas WHERE id = ?', (row['id_pessoa'],))
-            p = cursor.fetchone()
-            pessoa_casal = p['nome'] if p else ''
-        tasks = json.loads(row['tasks'] or '[]')
-        tasks_str = '; '.join([f"{t.get('descricao','')} [{t.get('avaliacao','')}]" for t in tasks])
-        assuntos_nesta = json.loads(row['assuntos_nesta'] or '[]')
-        assuntos_proximas = json.loads(row['assuntos_proximas'] or '[]')
-        ws.append([
-            row['id'], row['data'], row['caso_num'], row['sessao_num'], row['duracao'],
-            tipo, pessoa_casal, row['versiculo'] or '', row['anotacao_sessao'] or '',
-            tasks_str, ', '.join(assuntos_nesta), ', '.join(assuntos_proximas), row['status'] or 'realizada'
-        ])
-
-    for col in ws.columns:
-        max_length = 0
-        col_letter = col[0].column_letter
-        for cell in col:
-            try:
-                if len(str(cell.value)) > max_length:
-                    max_length = len(str(cell.value))
-            except:
-                pass
-        adjusted_width = min(max_length + 2, 50)
-        ws.column_dimensions[col_letter].width = adjusted_width
-
-    output = io.BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return send_file(output, download_name='sessoes.xlsx', as_attachment=True, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-
-# ===== BACKUP MANUAL =====
-@app.route('/api/backup', methods=['GET'])
-@autenticar_token
-def baixar_backup():
-    return send_file(DATABASE, as_attachment=True, download_name=f'backup_{datetime.now().strftime("%Y%m%d")}.db')
-
-# ===== LOGS =====
-@app.route('/api/logs', methods=['GET'])
-@autenticar_token
-def listar_logs():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT * FROM logs WHERE conselheiro_id = ? ORDER BY created_at DESC LIMIT 100', (request.user_id,))
-    rows = cursor.fetchall()
-    return jsonify([dict(row) for row in rows])
-
-# ===== PING =====
-@app.route('/api/ping', methods=['GET'])
-def ping():
-    return jsonify({'status': 'ok', 'timestamp': datetime.utcnow().isoformat()})
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+    resetFormSession(false);
+    verificarTokenSalvo();
+});
+</script>
+</body>
+</html>

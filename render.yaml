@@ -7,7 +7,3 @@ services:
   envVars:
     - key: SECRET_KEY
       generateValue: true
-  disk:
-    name: data
-    mountPath: /data
-    sizeGB: 1
