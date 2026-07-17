@@ -1,14 +1,14 @@
-import sqlite3
-import json
 import os
 import secrets
 import shutil
 import io
+import json
 from datetime import datetime, timedelta
 from functools import wraps
-
 from flask import Flask, request, jsonify, g, send_file, send_from_directory
 from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import func, or_
 import bcrypt
 import jwt
 from dotenv import load_dotenv
@@ -27,161 +27,155 @@ CORS(app)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'segredo_super_seguro_aconselhamento')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
 
-# Em produção no Render (plano free) não há /data, então usamos o diretório local
-DATA_DIR = '/data' if os.path.exists('/data') else '.'
-DATABASE = os.path.join(DATA_DIR, 'acompanhamento.db')
-UPLOAD_FOLDER = os.path.join(DATA_DIR, 'uploads')
-BACKUP_FOLDER = os.path.join(DATA_DIR, 'backups')
+# Configuração do banco de dados PostgreSQL (via DATABASE_URL)
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
+if app.config['SQLALCHEMY_DATABASE_URI'] and app.config['SQLALCHEMY_DATABASE_URI'].startswith('postgres://'):
+    # Render fornece 'postgres://', mas SQLAlchemy exige 'postgresql://'
+    app.config['SQLALCHEMY_DATABASE_URI'] = app.config['SQLALCHEMY_DATABASE_URI'].replace('postgres://', 'postgresql://', 1)
 
-os.makedirs(os.path.dirname(DATABASE) if os.path.dirname(DATABASE) else '.', exist_ok=True)
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Para compatibilidade com SQLite local (fallback)
+if not app.config['SQLALCHEMY_DATABASE_URI']:
+    # Se não houver DATABASE_URL, usar SQLite local (para desenvolvimento)
+    DATABASE_PATH = './database/aconselhamento.db'
+    os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
+    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{DATABASE_PATH}'
+
+db = SQLAlchemy(app)
+
+# Pastas para uploads e backups (persistência local – no Render free, serão efêmeras)
+UPLOAD_FOLDER = './uploads'
+BACKUP_FOLDER = './backups'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(BACKUP_FOLDER, exist_ok=True)
-
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['BACKUP_FOLDER'] = BACKUP_FOLDER
 
 PORT = int(os.getenv('PORT', 5000))
 ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'gif', 'doc', 'docx', 'txt'}
 
-# ===== BANCO DE DADOS =====
-def get_db():
-    db = getattr(g, '_database', None)
-    if db is None:
-        db = g._database = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row
-    return db
+# ===== MODELOS (TABELAS) =====
+class Conselheiro(db.Model):
+    __tablename__ = 'conselheiros'
+    id = db.Column(db.Integer, primary_key=True)
+    nome = db.Column(db.String(100), nullable=False)
+    senha_hash = db.Column(db.String(128), nullable=False)
+    obs = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-@app.teardown_appcontext
-def close_connection(exception):
-    db = getattr(g, '_database', None)
-    if db is not None:
-        db.close()
+    pessoas = db.relationship('Pessoa', backref='conselheiro', lazy=True, cascade='all, delete-orphan')
+    casais = db.relationship('Casal', backref='conselheiro', lazy=True, cascade='all, delete-orphan')
+    sessoes = db.relationship('Sessao', backref='conselheiro', lazy=True, cascade='all, delete-orphan')
+    anexos = db.relationship('Anexo', backref='conselheiro', lazy=True, cascade='all, delete-orphan')
+    lembretes = db.relationship('Lembrete', backref='conselheiro', lazy=True, cascade='all, delete-orphan')
+    logs = db.relationship('Log', backref='conselheiro', lazy=True, cascade='all, delete-orphan')
 
-def init_db():
-    with app.app_context():
-        db = get_db()
-        cursor = db.cursor()
-        cursor.executescript('''
-            CREATE TABLE IF NOT EXISTS conselheiros (
-                id INTEGER PRIMARY KEY,
-                nome TEXT NOT NULL,
-                senha_hash TEXT NOT NULL,
-                obs TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS pessoas (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conselheiro_id INTEGER NOT NULL,
-                nome TEXT NOT NULL,
-                obs TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS casais (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conselheiro_id INTEGER NOT NULL,
-                nome_casal TEXT,
-                id_homem INTEGER NOT NULL,
-                id_mulher INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE,
-                FOREIGN KEY (id_homem) REFERENCES pessoas(id) ON DELETE CASCADE,
-                FOREIGN KEY (id_mulher) REFERENCES pessoas(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS sessoes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conselheiro_id INTEGER NOT NULL,
-                data TEXT NOT NULL,
-                caso_num TEXT NOT NULL,
-                sessao_num INTEGER NOT NULL,
-                duracao TEXT,
-                is_casal INTEGER NOT NULL,
-                id_pessoa INTEGER,
-                id_casal INTEGER,
-                versiculo TEXT,
-                anotacao_sessao TEXT,
-                tasks TEXT,
-                tarefas_anteriores TEXT,
-                assuntos_nesta TEXT,
-                assuntos_proximas TEXT,
-                status TEXT DEFAULT 'realizada',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS anexos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                sessao_id INTEGER NOT NULL,
-                conselheiro_id INTEGER NOT NULL,
-                nome_original TEXT NOT NULL,
-                nome_arquivo TEXT NOT NULL,
-                caminho TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (sessao_id) REFERENCES sessoes(id) ON DELETE CASCADE,
-                FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS lembretes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conselheiro_id INTEGER NOT NULL,
-                sessao_id INTEGER,
-                titulo TEXT NOT NULL,
-                descricao TEXT,
-                data_lembrete TEXT NOT NULL,
-                concluido INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE,
-                FOREIGN KEY (sessao_id) REFERENCES sessoes(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conselheiro_id INTEGER NOT NULL,
-                acao TEXT NOT NULL,
-                detalhes TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (conselheiro_id) REFERENCES conselheiros(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS tokens_blacklist (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                token TEXT NOT NULL,
-                expira_em TIMESTAMP NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS configuracoes (
-                chave TEXT PRIMARY KEY,
-                valor TEXT NOT NULL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        ''')
-        # Migrações para sessoes
-        colunas_sessoes = [row['name'] for row in cursor.execute("PRAGMA table_info(sessoes)")]
-        if 'status' not in colunas_sessoes:
-            cursor.execute("ALTER TABLE sessoes ADD COLUMN status TEXT DEFAULT 'realizada'")
-        if 'tarefas_anteriores' not in colunas_sessoes:
-            cursor.execute("ALTER TABLE sessoes ADD COLUMN tarefas_anteriores TEXT")
-        if 'created_at' not in colunas_sessoes:
-            cursor.execute("ALTER TABLE sessoes ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        if 'updated_at' not in colunas_sessoes:
-            cursor.execute("ALTER TABLE sessoes ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+class Pessoa(db.Model):
+    __tablename__ = 'pessoas'
+    id = db.Column(db.Integer, primary_key=True)
+    conselheiro_id = db.Column(db.Integer, db.ForeignKey('conselheiros.id', ondelete='CASCADE'), nullable=False)
+    nome = db.Column(db.String(100), nullable=False)
+    obs = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-        # Migrações para lembretes
-        colunas_lembretes = [row['name'] for row in cursor.execute("PRAGMA table_info(lembretes)")]
-        if 'sessao_id' not in colunas_lembretes:
-            cursor.execute("ALTER TABLE lembretes ADD COLUMN sessao_id INTEGER REFERENCES sessoes(id) ON DELETE CASCADE")
+    # Relacionamentos
+    casais_homem = db.relationship('Casal', foreign_keys='Casal.id_homem', backref='homem', lazy=True, cascade='all, delete-orphan')
+    casais_mulher = db.relationship('Casal', foreign_keys='Casal.id_mulher', backref='mulher', lazy=True, cascade='all, delete-orphan')
 
-        # Configurações padrão
-        cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('cor_primaria', '#b58b4b')")
-        cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('cor_secundaria', '#2d6a4f')")
-        cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('cor_fundo', '#f5f1eb')")
-        cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('cor_texto', '#2e2b28')")
-        cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('logo_url', '')")
-        cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES ('nome_igreja', 'Igreja Batista')")
+class Casal(db.Model):
+    __tablename__ = 'casais'
+    id = db.Column(db.Integer, primary_key=True)
+    conselheiro_id = db.Column(db.Integer, db.ForeignKey('conselheiros.id', ondelete='CASCADE'), nullable=False)
+    nome_casal = db.Column(db.String(100))
+    id_homem = db.Column(db.Integer, db.ForeignKey('pessoas.id', ondelete='CASCADE'), nullable=False)
+    id_mulher = db.Column(db.Integer, db.ForeignKey('pessoas.id', ondelete='CASCADE'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-        db.commit()
+class Sessao(db.Model):
+    __tablename__ = 'sessoes'
+    id = db.Column(db.Integer, primary_key=True)
+    conselheiro_id = db.Column(db.Integer, db.ForeignKey('conselheiros.id', ondelete='CASCADE'), nullable=False)
+    data = db.Column(db.String(20), nullable=False)  # formato YYYY-MM-DD
+    caso_num = db.Column(db.String(20), nullable=False)
+    sessao_num = db.Column(db.Integer, nullable=False)
+    duracao = db.Column(db.String(20))
+    is_casal = db.Column(db.Integer, nullable=False, default=0)  # 0 ou 1
+    id_pessoa = db.Column(db.Integer, db.ForeignKey('pessoas.id', ondelete='SET NULL'))
+    id_casal = db.Column(db.Integer, db.ForeignKey('casais.id', ondelete='SET NULL'))
+    versiculo = db.Column(db.String(200))
+    anotacao_sessao = db.Column(db.Text)
+    tasks = db.Column(db.Text)  # JSON
+    tarefas_anteriores = db.Column(db.Text)  # JSON
+    assuntos_nesta = db.Column(db.Text)  # JSON
+    assuntos_proximas = db.Column(db.Text)  # JSON
+    status = db.Column(db.String(20), default='realizada')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-init_db()
+class Anexo(db.Model):
+    __tablename__ = 'anexos'
+    id = db.Column(db.Integer, primary_key=True)
+    sessao_id = db.Column(db.Integer, db.ForeignKey('sessoes.id', ondelete='CASCADE'), nullable=False)
+    conselheiro_id = db.Column(db.Integer, db.ForeignKey('conselheiros.id', ondelete='CASCADE'), nullable=False)
+    nome_original = db.Column(db.String(200), nullable=False)
+    nome_arquivo = db.Column(db.String(200), nullable=False)
+    caminho = db.Column(db.String(300), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Lembrete(db.Model):
+    __tablename__ = 'lembretes'
+    id = db.Column(db.Integer, primary_key=True)
+    conselheiro_id = db.Column(db.Integer, db.ForeignKey('conselheiros.id', ondelete='CASCADE'), nullable=False)
+    sessao_id = db.Column(db.Integer, db.ForeignKey('sessoes.id', ondelete='CASCADE'))
+    titulo = db.Column(db.String(100), nullable=False)
+    descricao = db.Column(db.Text)
+    data_lembrete = db.Column(db.String(20), nullable=False)  # YYYY-MM-DD
+    concluido = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Log(db.Model):
+    __tablename__ = 'logs'
+    id = db.Column(db.Integer, primary_key=True)
+    conselheiro_id = db.Column(db.Integer, db.ForeignKey('conselheiros.id', ondelete='CASCADE'), nullable=False)
+    acao = db.Column(db.String(100), nullable=False)
+    detalhes = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class TokenBlacklist(db.Model):
+    __tablename__ = 'tokens_blacklist'
+    id = db.Column(db.Integer, primary_key=True)
+    token = db.Column(db.String(500), nullable=False)
+    expira_em = db.Column(db.DateTime, nullable=False)
+
+class Configuracao(db.Model):
+    __tablename__ = 'configuracoes'
+    chave = db.Column(db.String(50), primary_key=True)
+    valor = db.Column(db.String(200), nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+# ===== CRIAÇÃO DAS TABELAS E MIGRAÇÕES =====
+with app.app_context():
+    db.create_all()
+    # Verificar e adicionar colunas extras que podem não existir (para compatibilidade com migrações)
+    # Como estamos usando SQLAlchemy, as colunas já estão definidas nos modelos.
+    # Adicionar configurações padrão se não existirem
+    configs_padrao = {
+        'cor_primaria': '#b58b4b',
+        'cor_secundaria': '#2d6a4f',
+        'cor_fundo': '#f5f1eb',
+        'cor_texto': '#2e2b28',
+        'logo_url': '',
+        'nome_igreja': 'Igreja Batista'
+    }
+    for chave, valor in configs_padrao.items():
+        if not Configuracao.query.filter_by(chave=chave).first():
+            db.session.add(Configuracao(chave=chave, valor=valor))
+    db.session.commit()
 
 # ===== SERVE FRONTEND =====
 @app.route('/')
@@ -192,23 +186,12 @@ def serve_index():
 def serve_static(path):
     return send_from_directory('frontend', path)
 
-# ===== BACKUP AUTOMÁTICO =====
+# ===== BACKUP AUTOMÁTICO (não usa banco, apenas arquivo) =====
 def fazer_backup():
-    if not os.path.exists(DATABASE):
-        return
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    backup_name = f"acompanhamento_backup_{timestamp}.db"
-    backup_path = os.path.join(app.config['BACKUP_FOLDER'], backup_name)
-    shutil.copy2(DATABASE, backup_path)
-    backups = sorted([f for f in os.listdir(app.config['BACKUP_FOLDER']) if f.endswith('.db')])
-    if len(backups) > 30:
-        for f in backups[:-30]:
-            os.remove(os.path.join(app.config['BACKUP_FOLDER'], f))
-    print(f"Backup realizado: {backup_path}")
-
-scheduler = BackgroundScheduler()
-scheduler.add_job(fazer_backup, trigger=IntervalTrigger(days=1), next_run_time=datetime.now() + timedelta(hours=1))
-scheduler.start()
+    # Como agora usamos PostgreSQL, o backup do arquivo .db não é mais relevante.
+    # Podemos manter para compatibilidade ou remover. Vou manter apenas como exemplo.
+    # Na prática, o banco é gerenciado pelo Render.
+    pass
 
 # ===== AUTENTICAÇÃO =====
 def gerar_token(conselheiro_id, refresh=False):
@@ -224,10 +207,8 @@ def autenticar_token(f):
             return jsonify({'erro': 'Token não fornecido'}), 401
         try:
             token = auth_header.split(' ')[1]
-            db = get_db()
-            cursor = db.cursor()
-            cursor.execute('SELECT 1 FROM tokens_blacklist WHERE token = ?', (token,))
-            if cursor.fetchone():
+            # Verificar blacklist
+            if TokenBlacklist.query.filter_by(token=token).first():
                 return jsonify({'erro': 'Token revogado'}), 403
             payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
             if payload.get('refresh'):
@@ -241,19 +222,16 @@ def autenticar_token(f):
     return decorated
 
 def log_acao(conselheiro_id, acao, detalhes=None):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('INSERT INTO logs (conselheiro_id, acao, detalhes) VALUES (?, ?, ?)',
-                   (conselheiro_id, acao, detalhes))
-    db.commit()
+    log = Log(conselheiro_id=conselheiro_id, acao=acao, detalhes=detalhes)
+    db.session.add(log)
+    db.session.commit()
 
 def obter_proximo_sessao_num(conselheiro_id, caso_num):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT MAX(sessao_num) as max_num FROM sessoes WHERE conselheiro_id = ? AND caso_num = ?',
-                   (conselheiro_id, caso_num))
-    row = cursor.fetchone()
-    return (row['max_num'] or 0) + 1
+    max_num = db.session.query(func.max(Sessao.sessao_num)).filter(
+        Sessao.conselheiro_id == conselheiro_id,
+        Sessao.caso_num == caso_num
+    ).scalar()
+    return (max_num or 0) + 1
 
 # ===== ROTAS PÚBLICAS =====
 @app.route('/api/registrar', methods=['POST'])
@@ -267,15 +245,12 @@ def registrar():
         return jsonify({'erro': 'ID, nome e senha são obrigatórios'}), 400
     if not isinstance(id_, int) or id_ <= 0:
         return jsonify({'erro': 'ID deve ser um número inteiro positivo'}), 400
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT id FROM conselheiros WHERE id = ?', (id_,))
-    if cursor.fetchone():
+    if Conselheiro.query.get(id_):
         return jsonify({'erro': 'Este ID já está em uso'}), 400
     senha_hash = bcrypt.hashpw(senha.encode('utf-8'), bcrypt.gensalt(12)).decode('utf-8')
-    cursor.execute('INSERT INTO conselheiros (id, nome, senha_hash, obs) VALUES (?, ?, ?, ?)',
-                   (id_, nome, senha_hash, obs))
-    db.commit()
+    cons = Conselheiro(id=id_, nome=nome, senha_hash=senha_hash, obs=obs)
+    db.session.add(cons)
+    db.session.commit()
     log_acao(id_, 'registro', f'Conselheiro {nome} cadastrado')
     return jsonify({'mensagem': 'Conselheiro registrado com sucesso'}), 201
 
@@ -286,21 +261,18 @@ def login():
     senha = data.get('senha')
     if not id_ or not senha:
         return jsonify({'erro': 'ID e senha são obrigatórios'}), 400
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT * FROM conselheiros WHERE id = ?', (id_,))
-    conselheiro = cursor.fetchone()
+    conselheiro = Conselheiro.query.get(id_)
     if not conselheiro:
         return jsonify({'erro': 'ID ou senha inválidos'}), 401
-    if not bcrypt.checkpw(senha.encode('utf-8'), conselheiro['senha_hash'].encode('utf-8')):
+    if not bcrypt.checkpw(senha.encode('utf-8'), conselheiro.senha_hash.encode('utf-8')):
         return jsonify({'erro': 'ID ou senha inválidos'}), 401
-    token = gerar_token(conselheiro['id'], refresh=False)
-    refresh = gerar_token(conselheiro['id'], refresh=True)
-    log_acao(conselheiro['id'], 'login', 'Login realizado')
+    token = gerar_token(conselheiro.id, refresh=False)
+    refresh = gerar_token(conselheiro.id, refresh=True)
+    log_acao(conselheiro.id, 'login', 'Login realizado')
     return jsonify({
         'token': token,
         'refresh': refresh,
-        'conselheiro': {'id': conselheiro['id'], 'nome': conselheiro['nome'], 'obs': conselheiro['obs']}
+        'conselheiro': {'id': conselheiro.id, 'nome': conselheiro.nome, 'obs': conselheiro.obs}
     })
 
 @app.route('/api/refresh', methods=['POST'])
@@ -313,10 +285,7 @@ def refresh_token():
         payload = jwt.decode(refresh_token, app.config['SECRET_KEY'], algorithms=['HS256'])
         if not payload.get('refresh'):
             return jsonify({'erro': 'Token inválido'}), 403
-        db = get_db()
-        cursor = db.cursor()
-        cursor.execute('SELECT 1 FROM tokens_blacklist WHERE token = ?', (refresh_token,))
-        if cursor.fetchone():
+        if TokenBlacklist.query.filter_by(token=refresh_token).first():
             return jsonify({'erro': 'Token revogado'}), 403
         novo_token = gerar_token(payload['id'], refresh=False)
         return jsonify({'token': novo_token})
@@ -329,11 +298,10 @@ def refresh_token():
 @autenticar_token
 def logout():
     token = request.headers.get('Authorization').split(' ')[1]
-    db = get_db()
-    cursor = db.cursor()
     exp = datetime.utcnow() + timedelta(days=1)
-    cursor.execute('INSERT INTO tokens_blacklist (token, expira_em) VALUES (?, ?)', (token, exp))
-    db.commit()
+    blacklist = TokenBlacklist(token=token, expira_em=exp)
+    db.session.add(blacklist)
+    db.session.commit()
     log_acao(request.user_id, 'logout', 'Logout realizado')
     return jsonify({'mensagem': 'Deslogado com sucesso'})
 
@@ -341,22 +309,20 @@ def logout():
 @app.route('/api/configuracoes', methods=['GET'])
 @autenticar_token
 def get_configuracoes():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT chave, valor FROM configuracoes')
-    rows = cursor.fetchall()
-    return jsonify({row['chave']: row['valor'] for row in rows})
+    configs = Configuracao.query.all()
+    return jsonify({c.chave: c.valor for c in configs})
 
 @app.route('/api/configuracoes', methods=['POST'])
 @autenticar_token
 def update_configuracoes():
     data = request.json
-    db = get_db()
-    cursor = db.cursor()
     for chave, valor in data.items():
-        cursor.execute('UPDATE configuracoes SET valor = ?, updated_at = CURRENT_TIMESTAMP WHERE chave = ?',
-                       (valor, chave))
-    db.commit()
+        config = Configuracao.query.get(chave)
+        if config:
+            config.valor = valor
+        else:
+            db.session.add(Configuracao(chave=chave, valor=valor))
+    db.session.commit()
     log_acao(request.user_id, 'atualizar_configuracoes', 'Configurações atualizadas')
     return jsonify({'mensagem': 'Configurações salvas'})
 
@@ -364,11 +330,10 @@ def update_configuracoes():
 @app.route('/api/pessoas', methods=['GET'])
 @autenticar_token
 def listar_pessoas():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT * FROM pessoas WHERE conselheiro_id = ? ORDER BY nome', (request.user_id,))
-    rows = cursor.fetchall()
-    return jsonify([dict(row) for row in rows])
+    pessoas = Pessoa.query.filter_by(conselheiro_id=request.user_id).order_by(Pessoa.nome).all()
+    return jsonify([{'id': p.id, 'nome': p.nome, 'obs': p.obs, 'conselheiro_id': p.conselheiro_id,
+                     'created_at': p.created_at.isoformat() if p.created_at else None,
+                     'updated_at': p.updated_at.isoformat() if p.updated_at else None} for p in pessoas])
 
 @app.route('/api/pessoas', methods=['POST'])
 @autenticar_token
@@ -378,32 +343,30 @@ def criar_pessoa():
     obs = data.get('obs', '')
     if not nome:
         return jsonify({'erro': 'Nome é obrigatório'}), 400
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('INSERT INTO pessoas (conselheiro_id, nome, obs) VALUES (?, ?, ?)',
-                   (request.user_id, nome, obs))
-    db.commit()
+    pessoa = Pessoa(conselheiro_id=request.user_id, nome=nome, obs=obs)
+    db.session.add(pessoa)
+    db.session.commit()
     log_acao(request.user_id, 'criar_pessoa', f'Pessoa {nome} criada')
-    return jsonify({'id': cursor.lastrowid, 'nome': nome, 'obs': obs}), 201
+    return jsonify({'id': pessoa.id, 'nome': pessoa.nome, 'obs': pessoa.obs}), 201
 
 @app.route('/api/pessoas/<int:id>', methods=['DELETE'])
 @autenticar_token
 def deletar_pessoa(id):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('DELETE FROM pessoas WHERE id = ? AND conselheiro_id = ?', (id, request.user_id))
-    db.commit()
-    return jsonify({'deletado': cursor.rowcount})
+    pessoa = Pessoa.query.filter_by(id=id, conselheiro_id=request.user_id).first()
+    if not pessoa:
+        return jsonify({'erro': 'Pessoa não encontrada'}), 404
+    db.session.delete(pessoa)
+    db.session.commit()
+    return jsonify({'deletado': 1})
 
 # ===== CASAIS =====
 @app.route('/api/casais', methods=['GET'])
 @autenticar_token
 def listar_casais():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT * FROM casais WHERE conselheiro_id = ? ORDER BY nome_casal', (request.user_id,))
-    rows = cursor.fetchall()
-    return jsonify([dict(row) for row in rows])
+    casais = Casal.query.filter_by(conselheiro_id=request.user_id).order_by(Casal.nome_casal).all()
+    return jsonify([{'id': c.id, 'nome_casal': c.nome_casal, 'id_homem': c.id_homem, 'id_mulher': c.id_mulher,
+                     'conselheiro_id': c.conselheiro_id,
+                     'created_at': c.created_at.isoformat() if c.created_at else None} for c in casais])
 
 @app.route('/api/casais', methods=['POST'])
 @autenticar_token
@@ -414,29 +377,31 @@ def criar_casal():
     id_mulher = data.get('id_mulher')
     if not id_homem or not id_mulher:
         return jsonify({'erro': 'Selecione marido e esposa'}), 400
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('INSERT INTO casais (conselheiro_id, nome_casal, id_homem, id_mulher) VALUES (?, ?, ?, ?)',
-                   (request.user_id, nome_casal, id_homem, id_mulher))
-    db.commit()
+    # Verificar se as pessoas existem e pertencem ao conselheiro
+    homem = Pessoa.query.filter_by(id=id_homem, conselheiro_id=request.user_id).first()
+    mulher = Pessoa.query.filter_by(id=id_mulher, conselheiro_id=request.user_id).first()
+    if not homem or not mulher:
+        return jsonify({'erro': 'Pessoa não encontrada'}), 404
+    casal = Casal(conselheiro_id=request.user_id, nome_casal=nome_casal, id_homem=id_homem, id_mulher=id_mulher)
+    db.session.add(casal)
+    db.session.commit()
     log_acao(request.user_id, 'criar_casal', f'Casal {nome_casal} criado')
-    return jsonify({'id': cursor.lastrowid}), 201
+    return jsonify({'id': casal.id}), 201
 
 @app.route('/api/casais/<int:id>', methods=['DELETE'])
 @autenticar_token
 def deletar_casal(id):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('DELETE FROM casais WHERE id = ? AND conselheiro_id = ?', (id, request.user_id))
-    db.commit()
-    return jsonify({'deletado': cursor.rowcount})
+    casal = Casal.query.filter_by(id=id, conselheiro_id=request.user_id).first()
+    if not casal:
+        return jsonify({'erro': 'Casal não encontrado'}), 404
+    db.session.delete(casal)
+    db.session.commit()
+    return jsonify({'deletado': 1})
 
 # ===== SESSÕES =====
 @app.route('/api/sessoes', methods=['GET'])
 @autenticar_token
 def listar_sessoes():
-    db = get_db()
-    cursor = db.cursor()
     page = int(request.args.get('page', 1))
     per_page = int(request.args.get('per_page', 20))
     offset = (page - 1) * per_page
@@ -445,53 +410,42 @@ def listar_sessoes():
     data_fim = request.args.get('data_fim')
     assunto = request.args.get('assunto')
 
-    query = 'SELECT * FROM sessoes WHERE conselheiro_id = ?'
-    params = [request.user_id]
+    query = Sessao.query.filter_by(conselheiro_id=request.user_id)
     if status_filter:
-        query += ' AND status = ?'
-        params.append(status_filter)
+        query = query.filter(Sessao.status == status_filter)
     if data_inicio:
-        query += ' AND data >= ?'
-        params.append(data_inicio)
+        query = query.filter(Sessao.data >= data_inicio)
     if data_fim:
-        query += ' AND data <= ?'
-        params.append(data_fim)
+        query = query.filter(Sessao.data <= data_fim)
     if assunto:
-        query += ' AND assuntos_nesta LIKE ?'
-        params.append(f'%{assunto}%')
-    query += ' ORDER BY data DESC LIMIT ? OFFSET ?'
-    params.extend([per_page, offset])
+        query = query.filter(Sessao.assuntos_nesta.ilike(f'%{assunto}%'))
 
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
+    total = query.count()
+    rows = query.order_by(Sessao.data.desc()).offset(offset).limit(per_page).all()
     resultado = []
-    for row in rows:
-        d = dict(row)
-        d['is_casal'] = bool(d['is_casal'])
-        d['tasks'] = json.loads(d['tasks'] or '[]')
-        d['tarefas_anteriores'] = json.loads(d['tarefas_anteriores'] or '[]')
-        d['assuntosNestaSessao'] = json.loads(d['assuntos_nesta'] or '[]')
-        d['assuntosProximasSessoes'] = json.loads(d['assuntos_proximas'] or '[]')
-        del d['assuntos_nesta']
-        del d['assuntos_proximas']
+    for s in rows:
+        d = {
+            'id': s.id,
+            'conselheiro_id': s.conselheiro_id,
+            'data': s.data,
+            'caso_num': s.caso_num,
+            'sessao_num': s.sessao_num,
+            'duracao': s.duracao,
+            'is_casal': bool(s.is_casal),
+            'id_pessoa': s.id_pessoa,
+            'id_casal': s.id_casal,
+            'versiculo': s.versiculo,
+            'anotacao_sessao': s.anotacao_sessao,
+            'tasks': json.loads(s.tasks) if s.tasks else [],
+            'tarefas_anteriores': json.loads(s.tarefas_anteriores) if s.tarefas_anteriores else [],
+            'assuntosNestaSessao': json.loads(s.assuntos_nesta) if s.assuntos_nesta else [],
+            'assuntosProximasSessoes': json.loads(s.assuntos_proximas) if s.assuntos_proximas else [],
+            'status': s.status,
+            'created_at': s.created_at.isoformat() if s.created_at else None,
+            'updated_at': s.updated_at.isoformat() if s.updated_at else None
+        }
         resultado.append(d)
 
-    count_query = 'SELECT COUNT(*) as total FROM sessoes WHERE conselheiro_id = ?'
-    count_params = [request.user_id]
-    if status_filter:
-        count_query += ' AND status = ?'
-        count_params.append(status_filter)
-    if data_inicio:
-        count_query += ' AND data >= ?'
-        count_params.append(data_inicio)
-    if data_fim:
-        count_query += ' AND data <= ?'
-        count_params.append(data_fim)
-    if assunto:
-        count_query += ' AND assuntos_nesta LIKE ?'
-        count_params.append(f'%{assunto}%')
-    cursor.execute(count_query, count_params)
-    total = cursor.fetchone()['total']
     return jsonify({
         'items': resultado,
         'total': total,
@@ -527,47 +481,51 @@ def criar_sessao():
     assuntos_proximas = json.dumps(data.get('assuntosProximasSessoes', []))
 
     tarefas_anteriores = []
-    db = get_db()
-    cursor = db.cursor()
     if 'tarefas_anteriores' in data and data['tarefas_anteriores']:
         tarefas_anteriores = data['tarefas_anteriores']
     else:
-        cursor.execute('''
-            SELECT id, tasks FROM sessoes
-            WHERE conselheiro_id = ? AND caso_num = ? AND id != (SELECT MAX(id) FROM sessoes WHERE conselheiro_id = ? AND caso_num = ?)
-            ORDER BY sessao_num DESC LIMIT 1
-        ''', (request.user_id, caso_num, request.user_id, caso_num))
-        ultima = cursor.fetchone()
+        # Buscar última sessão do mesmo caso
+        ultima = Sessao.query.filter_by(conselheiro_id=request.user_id, caso_num=caso_num).order_by(Sessao.sessao_num.desc()).first()
         if ultima:
-            tasks_ant = json.loads(ultima['tasks'] or '[]')
+            tasks_ant = json.loads(ultima.tasks) if ultima.tasks else []
             for idx, t in enumerate(tasks_ant):
                 if not t.get('avaliacao', '').strip():
                     tarefas_anteriores.append({
-                        'sessao_origem_id': ultima['id'],
+                        'sessao_origem_id': ultima.id,
                         'indice': idx,
                         'descricao': t.get('descricao', '')
                     })
 
     tarefas_anteriores_json = json.dumps(tarefas_anteriores)
-    cursor.execute('''
-        INSERT INTO sessoes (
-            conselheiro_id, data, caso_num, sessao_num, duracao,
-            is_casal, id_pessoa, id_casal, versiculo, anotacao_sessao,
-            tasks, tarefas_anteriores, assuntos_nesta, assuntos_proximas, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        request.user_id, data_sessao, caso_num, sessao_num, duracao,
-        1 if is_casal else 0, id_pessoa, id_casal,
-        versiculo, anotacao,
-        tasks, tarefas_anteriores_json, assuntos_nesta, assuntos_proximas, status
-    ))
-    db.commit()
+    sessao = Sessao(
+        conselheiro_id=request.user_id,
+        data=data_sessao,
+        caso_num=caso_num,
+        sessao_num=sessao_num,
+        duracao=duracao,
+        is_casal=1 if is_casal else 0,
+        id_pessoa=id_pessoa,
+        id_casal=id_casal,
+        versiculo=versiculo,
+        anotacao_sessao=anotacao,
+        tasks=tasks,
+        tarefas_anteriores=tarefas_anteriores_json,
+        assuntos_nesta=assuntos_nesta,
+        assuntos_proximas=assuntos_proximas,
+        status=status
+    )
+    db.session.add(sessao)
+    db.session.commit()
     log_acao(request.user_id, 'criar_sessao', f'Sessão {caso_num}-{sessao_num} criada')
-    return jsonify({'id': cursor.lastrowid, 'sessao_num': sessao_num}), 201
+    return jsonify({'id': sessao.id, 'sessao_num': sessao_num}), 201
 
 @app.route('/api/sessoes/<int:id>', methods=['PUT'])
 @autenticar_token
 def atualizar_sessao(id):
+    sessao = Sessao.query.filter_by(id=id, conselheiro_id=request.user_id).first()
+    if not sessao:
+        return jsonify({'erro': 'Sessão não encontrada'}), 404
+
     data = request.json
     data_sessao = data.get('data')
     caso_num = data.get('casoNum')
@@ -583,46 +541,34 @@ def atualizar_sessao(id):
     if not is_casal and not id_pessoa:
         return jsonify({'erro': 'Pessoa não selecionada'}), 400
 
-    duracao = data.get('duracao', '')
-    versiculo = data.get('versiculo', '')
-    anotacao = data.get('anotacaoSessao', '')
-    status = data.get('status', 'realizada')
-    tasks = json.dumps(data.get('tasks', []))
-    tarefas_anteriores = json.dumps(data.get('tarefas_anteriores', []))
-    assuntos_nesta = json.dumps(data.get('assuntosNestaSessao', []))
-    assuntos_proximas = json.dumps(data.get('assuntosProximasSessoes', []))
-
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('''
-        UPDATE sessoes SET
-            data = ?, caso_num = ?, sessao_num = ?, duracao = ?,
-            is_casal = ?, id_pessoa = ?, id_casal = ?,
-            versiculo = ?, anotacao_sessao = ?,
-            tasks = ?, tarefas_anteriores = ?, assuntos_nesta = ?, assuntos_proximas = ?,
-            status = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND conselheiro_id = ?
-    ''', (
-        data_sessao, caso_num, sessao_num, duracao,
-        1 if is_casal else 0, id_pessoa, id_casal,
-        versiculo, anotacao,
-        tasks, tarefas_anteriores, assuntos_nesta, assuntos_proximas,
-        status, id, request.user_id
-    ))
-    db.commit()
-    if cursor.rowcount == 0:
-        return jsonify({'erro': 'Sessão não encontrada'}), 404
+    sessao.data = data_sessao
+    sessao.caso_num = caso_num
+    sessao.sessao_num = sessao_num
+    sessao.duracao = data.get('duracao', '')
+    sessao.is_casal = 1 if is_casal else 0
+    sessao.id_pessoa = id_pessoa
+    sessao.id_casal = id_casal
+    sessao.versiculo = data.get('versiculo', '')
+    sessao.anotacao_sessao = data.get('anotacaoSessao', '')
+    sessao.status = data.get('status', 'realizada')
+    sessao.tasks = json.dumps(data.get('tasks', []))
+    sessao.tarefas_anteriores = json.dumps(data.get('tarefas_anteriores', []))
+    sessao.assuntos_nesta = json.dumps(data.get('assuntosNestaSessao', []))
+    sessao.assuntos_proximas = json.dumps(data.get('assuntosProximasSessoes', []))
+    sessao.updated_at = datetime.utcnow()
+    db.session.commit()
     log_acao(request.user_id, 'atualizar_sessao', f'Sessão {id} atualizada')
-    return jsonify({'atualizado': cursor.rowcount})
+    return jsonify({'atualizado': 1})
 
 @app.route('/api/sessoes/<int:id>', methods=['DELETE'])
 @autenticar_token
 def deletar_sessao(id):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('DELETE FROM sessoes WHERE id = ? AND conselheiro_id = ?', (id, request.user_id))
-    db.commit()
-    return jsonify({'deletado': cursor.rowcount})
+    sessao = Sessao.query.filter_by(id=id, conselheiro_id=request.user_id).first()
+    if not sessao:
+        return jsonify({'erro': 'Sessão não encontrada'}), 404
+    db.session.delete(sessao)
+    db.session.commit()
+    return jsonify({'deletado': 1})
 
 # ===== ÚLTIMA SESSÃO (tarefas pendentes) =====
 @app.route('/api/ultima_sessao', methods=['GET'])
@@ -633,31 +579,20 @@ def ultima_sessao():
     if not pessoa_id and not casal_id:
         return jsonify({'erro': 'Informe pessoa_id ou casal_id'}), 400
 
-    db = get_db()
-    cursor = db.cursor()
     if pessoa_id:
-        cursor.execute('''
-            SELECT id, caso_num, tasks FROM sessoes
-            WHERE conselheiro_id = ? AND id_pessoa = ?
-            ORDER BY sessao_num DESC LIMIT 1
-        ''', (request.user_id, pessoa_id))
+        ultima = Sessao.query.filter_by(conselheiro_id=request.user_id, id_pessoa=pessoa_id).order_by(Sessao.sessao_num.desc()).first()
     else:
-        cursor.execute('''
-            SELECT id, caso_num, tasks FROM sessoes
-            WHERE conselheiro_id = ? AND id_casal = ?
-            ORDER BY sessao_num DESC LIMIT 1
-        ''', (request.user_id, casal_id))
+        ultima = Sessao.query.filter_by(conselheiro_id=request.user_id, id_casal=casal_id).order_by(Sessao.sessao_num.desc()).first()
 
-    row = cursor.fetchone()
-    if not row:
+    if not ultima:
         return jsonify({'tarefas': []})
 
-    tasks = json.loads(row['tasks'] or '[]')
+    tasks = json.loads(ultima.tasks) if ultima.tasks else []
     pendentes = []
     for idx, t in enumerate(tasks):
         if not t.get('avaliacao', '').strip():
             pendentes.append({
-                'sessao_origem_id': row['id'],
+                'sessao_origem_id': ultima.id,
                 'indice': idx,
                 'descricao': t.get('descricao', '')
             })
@@ -675,20 +610,17 @@ def avaliar_tarefa_anterior():
     if sessao_origem_id is None or indice is None:
         return jsonify({'erro': 'Parâmetros inválidos'}), 400
 
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT tasks FROM sessoes WHERE id = ? AND conselheiro_id = ?', (sessao_origem_id, request.user_id))
-    row = cursor.fetchone()
-    if not row:
+    sessao = Sessao.query.filter_by(id=sessao_origem_id, conselheiro_id=request.user_id).first()
+    if not sessao:
         return jsonify({'erro': 'Sessão não encontrada'}), 404
 
-    tasks = json.loads(row['tasks'] or '[]')
+    tasks = json.loads(sessao.tasks) if sessao.tasks else []
     if indice >= len(tasks):
         return jsonify({'erro': 'Índice inválido'}), 400
 
     tasks[indice]['avaliacao'] = avaliacao
-    cursor.execute('UPDATE sessoes SET tasks = ? WHERE id = ?', (json.dumps(tasks), sessao_origem_id))
-    db.commit()
+    sessao.tasks = json.dumps(tasks)
+    db.session.commit()
     log_acao(request.user_id, 'avaliar_tarefa', f'Tarefa {indice} da sessão {sessao_origem_id} avaliada')
     return jsonify({'mensagem': 'Avaliação salva'})
 
@@ -707,10 +639,8 @@ def upload_anexo(sessao_id):
     if not allowed_file(file.filename):
         return jsonify({'erro': 'Tipo de arquivo não permitido'}), 400
 
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT id FROM sessoes WHERE id = ? AND conselheiro_id = ?', (sessao_id, request.user_id))
-    if not cursor.fetchone():
+    sessao = Sessao.query.filter_by(id=sessao_id, conselheiro_id=request.user_id).first()
+    if not sessao:
         return jsonify({'erro': 'Sessão não encontrada'}), 404
 
     filename = secure_filename(file.filename)
@@ -718,60 +648,55 @@ def upload_anexo(sessao_id):
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_name)
     file.save(filepath)
 
-    cursor.execute(
-        'INSERT INTO anexos (sessao_id, conselheiro_id, nome_original, nome_arquivo, caminho) VALUES (?, ?, ?, ?, ?)',
-        (sessao_id, request.user_id, filename, unique_name, filepath)
+    anexo = Anexo(
+        sessao_id=sessao_id,
+        conselheiro_id=request.user_id,
+        nome_original=filename,
+        nome_arquivo=unique_name,
+        caminho=filepath
     )
-    db.commit()
+    db.session.add(anexo)
+    db.session.commit()
     log_acao(request.user_id, 'upload_anexo', f'Anexo {filename} para sessão {sessao_id}')
-    return jsonify({'id': cursor.lastrowid, 'mensagem': 'Arquivo enviado'}), 201
+    return jsonify({'id': anexo.id, 'mensagem': 'Arquivo enviado'}), 201
 
 @app.route('/api/anexos/<int:sessao_id>', methods=['GET'])
 @autenticar_token
 def listar_anexos(sessao_id):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT * FROM anexos WHERE sessao_id = ? AND conselheiro_id = ?', (sessao_id, request.user_id))
-    rows = cursor.fetchall()
-    return jsonify([dict(row) for row in rows])
+    anexos = Anexo.query.filter_by(sessao_id=sessao_id, conselheiro_id=request.user_id).all()
+    return jsonify([{'id': a.id, 'nome_original': a.nome_original, 'nome_arquivo': a.nome_arquivo,
+                     'caminho': a.caminho, 'created_at': a.created_at.isoformat() if a.created_at else None} for a in anexos])
 
 @app.route('/api/anexos/<int:anexo_id>', methods=['DELETE'])
 @autenticar_token
 def deletar_anexo(anexo_id):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT caminho FROM anexos WHERE id = ? AND conselheiro_id = ?', (anexo_id, request.user_id))
-    row = cursor.fetchone()
-    if not row:
+    anexo = Anexo.query.filter_by(id=anexo_id, conselheiro_id=request.user_id).first()
+    if not anexo:
         return jsonify({'erro': 'Anexo não encontrado'}), 404
-    filepath = row['caminho']
-    if os.path.exists(filepath):
-        os.remove(filepath)
-    cursor.execute('DELETE FROM anexos WHERE id = ?', (anexo_id,))
-    db.commit()
+    if os.path.exists(anexo.caminho):
+        os.remove(anexo.caminho)
+    db.session.delete(anexo)
+    db.session.commit()
     log_acao(request.user_id, 'deletar_anexo', f'Anexo {anexo_id} removido')
     return jsonify({'deletado': 1})
 
 @app.route('/api/anexos/download/<int:anexo_id>', methods=['GET'])
 @autenticar_token
 def download_anexo(anexo_id):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT nome_original, caminho FROM anexos WHERE id = ? AND conselheiro_id = ?', (anexo_id, request.user_id))
-    row = cursor.fetchone()
-    if not row:
+    anexo = Anexo.query.filter_by(id=anexo_id, conselheiro_id=request.user_id).first()
+    if not anexo:
         return jsonify({'erro': 'Anexo não encontrado'}), 404
-    return send_file(row['caminho'], download_name=row['nome_original'])
+    return send_file(anexo.caminho, download_name=anexo.nome_original)
 
 # ===== LEMBRETES =====
 @app.route('/api/lembretes', methods=['GET'])
 @autenticar_token
 def listar_lembretes():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT * FROM lembretes WHERE conselheiro_id = ? ORDER BY data_lembrete', (request.user_id,))
-    rows = cursor.fetchall()
-    return jsonify([dict(row) for row in rows])
+    lembretes = Lembrete.query.filter_by(conselheiro_id=request.user_id).order_by(Lembrete.data_lembrete).all()
+    return jsonify([{'id': l.id, 'titulo': l.titulo, 'descricao': l.descricao,
+                     'data_lembrete': l.data_lembrete, 'concluido': l.concluido,
+                     'sessao_id': l.sessao_id,
+                     'created_at': l.created_at.isoformat() if l.created_at else None} for l in lembretes])
 
 @app.route('/api/lembretes', methods=['POST'])
 @autenticar_token
@@ -783,70 +708,74 @@ def criar_lembrete():
     sessao_id = data.get('sessao_id')
     if not titulo or not data_lembrete:
         return jsonify({'erro': 'Título e data são obrigatórios'}), 400
-    db = get_db()
-    cursor = db.cursor()
     if sessao_id:
-        cursor.execute('SELECT id FROM sessoes WHERE id = ? AND conselheiro_id = ?', (sessao_id, request.user_id))
-        if not cursor.fetchone():
+        if not Sessao.query.filter_by(id=sessao_id, conselheiro_id=request.user_id).first():
             return jsonify({'erro': 'Sessão não encontrada'}), 404
-    cursor.execute(
-        'INSERT INTO lembretes (conselheiro_id, sessao_id, titulo, descricao, data_lembrete) VALUES (?, ?, ?, ?, ?)',
-        (request.user_id, sessao_id, titulo, descricao, data_lembrete)
+    lembrete = Lembrete(
+        conselheiro_id=request.user_id,
+        sessao_id=sessao_id,
+        titulo=titulo,
+        descricao=descricao,
+        data_lembrete=data_lembrete
     )
-    db.commit()
+    db.session.add(lembrete)
+    db.session.commit()
     log_acao(request.user_id, 'criar_lembrete', f'Lembrete {titulo}')
-    return jsonify({'id': cursor.lastrowid}), 201
+    return jsonify({'id': lembrete.id}), 201
 
 @app.route('/api/lembretes/<int:id>', methods=['PUT'])
 @autenticar_token
 def atualizar_lembrete(id):
+    lembrete = Lembrete.query.filter_by(id=id, conselheiro_id=request.user_id).first()
+    if not lembrete:
+        return jsonify({'erro': 'Lembrete não encontrado'}), 404
     data = request.json
     concluido = data.get('concluido', 0)
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute(
-        'UPDATE lembretes SET concluido = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND conselheiro_id = ?',
-        (concluido, id, request.user_id)
-    )
-    db.commit()
-    return jsonify({'atualizado': cursor.rowcount})
+    lembrete.concluido = concluido
+    lembrete.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({'atualizado': 1})
 
 @app.route('/api/lembretes/<int:id>', methods=['DELETE'])
 @autenticar_token
 def deletar_lembrete(id):
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('DELETE FROM lembretes WHERE id = ? AND conselheiro_id = ?', (id, request.user_id))
-    db.commit()
-    return jsonify({'deletado': cursor.rowcount})
+    lembrete = Lembrete.query.filter_by(id=id, conselheiro_id=request.user_id).first()
+    if not lembrete:
+        return jsonify({'erro': 'Lembrete não encontrado'}), 404
+    db.session.delete(lembrete)
+    db.session.commit()
+    return jsonify({'deletado': 1})
 
 # ===== ESTATÍSTICAS =====
 @app.route('/api/estatisticas', methods=['GET'])
 @autenticar_token
 def estatisticas():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT COUNT(*) as total FROM sessoes WHERE conselheiro_id = ?', (request.user_id,))
-    total_sessoes = cursor.fetchone()['total']
-    cursor.execute('SELECT COUNT(*) as total FROM pessoas WHERE conselheiro_id = ?', (request.user_id,))
-    total_pessoas = cursor.fetchone()['total']
-    cursor.execute('SELECT COUNT(*) as total FROM casais WHERE conselheiro_id = ?', (request.user_id,))
-    total_casais = cursor.fetchone()['total']
-    cursor.execute('''
-        SELECT COUNT(*) as total FROM sessoes, json_each(sessoes.tasks) as task
-        WHERE sessoes.conselheiro_id = ? AND json_extract(task.value, '$.avaliacao') IS NULL
-    ''', (request.user_id,))
-    tarefas_pendentes = cursor.fetchone()['total']
-    cursor.execute('SELECT COUNT(*) as total FROM lembretes WHERE conselheiro_id = ? AND concluido = 0', (request.user_id,))
-    lembretes_pendentes = cursor.fetchone()['total']
-    cursor.execute('''
-        SELECT strftime('%Y-%m', data) as mes, COUNT(*) as total
-        FROM sessoes
-        WHERE conselheiro_id = ? AND data >= date('now', '-12 months')
-        GROUP BY mes
-        ORDER BY mes
-    ''', (request.user_id,))
-    sessoes_por_mes = [{'mes': row['mes'], 'total': row['total']} for row in cursor.fetchall()]
+    total_sessoes = Sessao.query.filter_by(conselheiro_id=request.user_id).count()
+    total_pessoas = Pessoa.query.filter_by(conselheiro_id=request.user_id).count()
+    total_casais = Casal.query.filter_by(conselheiro_id=request.user_id).count()
+    # Tarefas pendentes: contar tasks onde avaliação é vazia (usando JSON functions do PostgreSQL)
+    # Como é complexo com SQLAlchemy, podemos fazer uma query raw ou simplificar contando todas as tasks.
+    # Vamos calcular via Python (mais fácil)
+    sessoes = Sessao.query.filter_by(conselheiro_id=request.user_id).all()
+    tarefas_pendentes = 0
+    for s in sessoes:
+        if s.tasks:
+            tasks = json.loads(s.tasks)
+            for t in tasks:
+                if not t.get('avaliacao', '').strip():
+                    tarefas_pendentes += 1
+    lembretes_pendentes = Lembrete.query.filter_by(conselheiro_id=request.user_id, concluido=0).count()
+
+    # Sessões por mês (últimos 12 meses)
+    meses = db.session.query(
+        func.strftime('%Y-%m', Sessao.data).label('mes'),
+        func.count().label('total')
+    ).filter(
+        Sessao.conselheiro_id == request.user_id,
+        Sessao.data >= (datetime.utcnow() - timedelta(days=365)).strftime('%Y-%m-%d')
+    ).group_by('mes').order_by('mes').all()
+    sessoes_por_mes = [{'mes': m.mes, 'total': m.total} for m in meses]
+
     return jsonify({
         'total_sessoes': total_sessoes,
         'total_pessoas': total_pessoas,
@@ -860,25 +789,17 @@ def estatisticas():
 @app.route('/api/relatorios/tarefas-pendentes', methods=['GET'])
 @autenticar_token
 def relatorio_tarefas_pendentes():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('''
-        SELECT id, caso_num, sessao_num, data, tasks FROM sessoes
-        WHERE conselheiro_id = ? AND tasks IS NOT NULL AND tasks != '[]'
-        ORDER BY data DESC
-    ''', (request.user_id,))
-    rows = cursor.fetchall()
+    sessoes = Sessao.query.filter_by(conselheiro_id=request.user_id).filter(Sessao.tasks.isnot(None)).filter(Sessao.tasks != '[]').order_by(Sessao.data.desc()).all()
     resultado = []
-    for row in rows:
-        tasks = json.loads(row['tasks'] or '[]')
-        pendentes = [{'descricao': t.get('descricao', ''), 'avaliacao': t.get('avaliacao', '')}
-                     for t in tasks if not t.get('avaliacao', '').strip()]
+    for s in sessoes:
+        tasks = json.loads(s.tasks) if s.tasks else []
+        pendentes = [{'descricao': t.get('descricao', ''), 'avaliacao': t.get('avaliacao', '')} for t in tasks if not t.get('avaliacao', '').strip()]
         if pendentes:
             resultado.append({
-                'sessao_id': row['id'],
-                'caso': row['caso_num'],
-                'sessao': row['sessao_num'],
-                'data': row['data'],
+                'sessao_id': s.id,
+                'caso': s.caso_num,
+                'sessao': s.sessao_num,
+                'data': s.data,
                 'tarefas_pendentes': pendentes
             })
     return jsonify(resultado)
@@ -890,60 +811,59 @@ def relatorio_sessoes_periodo():
     data_fim = request.args.get('data_fim')
     if not data_inicio or not data_fim:
         return jsonify({'erro': 'Informe data_inicio e data_fim'}), 400
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('''
-        SELECT * FROM sessoes
-        WHERE conselheiro_id = ? AND data BETWEEN ? AND ?
-        ORDER BY data DESC
-    ''', (request.user_id, data_inicio, data_fim))
-    rows = cursor.fetchall()
+    sessoes = Sessao.query.filter_by(conselheiro_id=request.user_id).filter(Sessao.data.between(data_inicio, data_fim)).order_by(Sessao.data.desc()).all()
     resultado = []
-    for row in rows:
-        d = dict(row)
-        d['is_casal'] = bool(d['is_casal'])
-        d['tasks'] = json.loads(d['tasks'] or '[]')
-        d['tarefas_anteriores'] = json.loads(d['tarefas_anteriores'] or '[]')
-        d['assuntosNestaSessao'] = json.loads(d['assuntos_nesta'] or '[]')
-        d['assuntosProximasSessoes'] = json.loads(d['assuntos_proximas'] or '[]')
-        del d['assuntos_nesta']
-        del d['assuntos_proximas']
+    for s in sessoes:
+        d = {
+            'id': s.id,
+            'data': s.data,
+            'caso_num': s.caso_num,
+            'sessao_num': s.sessao_num,
+            'duracao': s.duracao,
+            'is_casal': bool(s.is_casal),
+            'id_pessoa': s.id_pessoa,
+            'id_casal': s.id_casal,
+            'versiculo': s.versiculo,
+            'anotacao_sessao': s.anotacao_sessao,
+            'tasks': json.loads(s.tasks) if s.tasks else [],
+            'tarefas_anteriores': json.loads(s.tarefas_anteriores) if s.tarefas_anteriores else [],
+            'assuntosNestaSessao': json.loads(s.assuntos_nesta) if s.assuntos_nesta else [],
+            'assuntosProximasSessoes': json.loads(s.assuntos_proximas) if s.assuntos_proximas else [],
+            'status': s.status
+        }
         resultado.append(d)
     return jsonify(resultado)
 
 @app.route('/api/relatorios/pessoas-atendidas', methods=['GET'])
 @autenticar_token
 def relatorio_pessoas_atendidas():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('''
-        SELECT DISTINCT p.id, p.nome, p.obs,
-            (SELECT COUNT(*) FROM sessoes WHERE sessoes.id_pessoa = p.id AND sessoes.conselheiro_id = ?) as total_sessoes
-        FROM pessoas p
-        WHERE p.conselheiro_id = ?
-        ORDER BY total_sessoes DESC
-    ''', (request.user_id, request.user_id))
-    rows = cursor.fetchall()
-    return jsonify([dict(row) for row in rows])
+    # Pessoas que têm sessões
+    pessoas = Pessoa.query.filter_by(conselheiro_id=request.user_id).all()
+    resultado = []
+    for p in pessoas:
+        total_sessoes = Sessao.query.filter_by(conselheiro_id=request.user_id, id_pessoa=p.id).count()
+        resultado.append({
+            'id': p.id,
+            'nome': p.nome,
+            'obs': p.obs,
+            'total_sessoes': total_sessoes
+        })
+    # Ordenar por total_sessoes decrescente
+    resultado.sort(key=lambda x: x['total_sessoes'], reverse=True)
+    return jsonify(resultado)
 
 # ===== EXPORTAÇÃO EXCEL =====
 @app.route('/api/exportar/excel', methods=['GET'])
 @autenticar_token
 def exportar_excel():
-    db = get_db()
-    cursor = db.cursor()
     data_inicio = request.args.get('data_inicio')
     data_fim = request.args.get('data_fim')
-    query = 'SELECT * FROM sessoes WHERE conselheiro_id = ?'
-    params = [request.user_id]
+    query = Sessao.query.filter_by(conselheiro_id=request.user_id)
     if data_inicio:
-        query += ' AND data >= ?'
-        params.append(data_inicio)
+        query = query.filter(Sessao.data >= data_inicio)
     if data_fim:
-        query += ' AND data <= ?'
-        params.append(data_fim)
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
+        query = query.filter(Sessao.data <= data_fim)
+    rows = query.all()
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -956,25 +876,23 @@ def exportar_excel():
         cell.fill = PatternFill(start_color="DDDDDD", end_color="DDDDDD", fill_type="solid")
         cell.alignment = Alignment(horizontal='center')
 
-    for row in rows:
-        tipo = 'Casal' if row['is_casal'] else 'Individual'
+    for s in rows:
+        tipo = 'Casal' if s.is_casal else 'Individual'
         pessoa_casal = ''
-        if row['is_casal']:
-            cursor.execute('SELECT nome_casal FROM casais WHERE id = ?', (row['id_casal'],))
-            c = cursor.fetchone()
-            pessoa_casal = c['nome_casal'] if c else ''
-        else:
-            cursor.execute('SELECT nome FROM pessoas WHERE id = ?', (row['id_pessoa'],))
-            p = cursor.fetchone()
-            pessoa_casal = p['nome'] if p else ''
-        tasks = json.loads(row['tasks'] or '[]')
+        if s.is_casal and s.id_casal:
+            casal = Casal.query.get(s.id_casal)
+            pessoa_casal = casal.nome_casal if casal else ''
+        elif s.id_pessoa:
+            pessoa = Pessoa.query.get(s.id_pessoa)
+            pessoa_casal = pessoa.nome if pessoa else ''
+        tasks = json.loads(s.tasks) if s.tasks else []
         tasks_str = '; '.join([f"{t.get('descricao','')} [{t.get('avaliacao','')}]" for t in tasks])
-        assuntos_nesta = json.loads(row['assuntos_nesta'] or '[]')
-        assuntos_proximas = json.loads(row['assuntos_proximas'] or '[]')
+        assuntos_nesta = json.loads(s.assuntos_nesta) if s.assuntos_nesta else []
+        assuntos_proximas = json.loads(s.assuntos_proximas) if s.assuntos_proximas else []
         ws.append([
-            row['id'], row['data'], row['caso_num'], row['sessao_num'], row['duracao'],
-            tipo, pessoa_casal, row['versiculo'] or '', row['anotacao_sessao'] or '',
-            tasks_str, ', '.join(assuntos_nesta), ', '.join(assuntos_proximas), row['status'] or 'realizada'
+            s.id, s.data, s.caso_num, s.sessao_num, s.duracao,
+            tipo, pessoa_casal, s.versiculo or '', s.anotacao_sessao or '',
+            tasks_str, ', '.join(assuntos_nesta), ', '.join(assuntos_proximas), s.status or 'realizada'
         ])
 
     for col in ws.columns:
@@ -998,17 +916,17 @@ def exportar_excel():
 @app.route('/api/backup', methods=['GET'])
 @autenticar_token
 def baixar_backup():
-    return send_file(DATABASE, as_attachment=True, download_name=f'backup_{datetime.now().strftime("%Y%m%d")}.db')
+    # Com PostgreSQL, não temos um arquivo .db para baixar, mas podemos exportar dados.
+    # Vamos retornar um arquivo JSON com todas as tabelas (simplificado).
+    # Ou simplesmente retornamos uma mensagem informando que o backup é gerenciado pelo Render.
+    return jsonify({'mensagem': 'Backup via PostgreSQL é gerenciado pelo Render. Utilize a ferramenta de backup do Render.'}), 200
 
 # ===== LOGS =====
 @app.route('/api/logs', methods=['GET'])
 @autenticar_token
 def listar_logs():
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT * FROM logs WHERE conselheiro_id = ? ORDER BY created_at DESC LIMIT 100', (request.user_id,))
-    rows = cursor.fetchall()
-    return jsonify([dict(row) for row in rows])
+    logs = Log.query.filter_by(conselheiro_id=request.user_id).order_by(Log.created_at.desc()).limit(100).all()
+    return jsonify([{'id': l.id, 'acao': l.acao, 'detalhes': l.detalhes, 'created_at': l.created_at.isoformat() if l.created_at else None} for l in logs])
 
 # ===== PING =====
 @app.route('/api/ping', methods=['GET'])
