@@ -1,10 +1,14 @@
 import os
+import sys
+import logging
+import sqlite3
+import json
 import secrets
 import shutil
 import io
-import json
 from datetime import datetime, timedelta
 from functools import wraps
+
 from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
@@ -18,6 +22,10 @@ from werkzeug.utils import secure_filename
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+# Configurar logging
+logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+logger = logging.getLogger(__name__)
+
 load_dotenv()
 
 app = Flask(__name__, static_folder='frontend', static_url_path='')
@@ -27,26 +35,35 @@ CORS(app)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'segredo_super_seguro_aconselhamento')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
 
-# Banco de dados (PostgreSQL ou SQLite fallback)
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
-if app.config['SQLALCHEMY_DATABASE_URI'] and app.config['SQLALCHEMY_DATABASE_URI'].startswith('postgres://'):
-    app.config['SQLALCHEMY_DATABASE_URI'] = app.config['SQLALCHEMY_DATABASE_URI'].replace('postgres://', 'postgresql://', 1)
-
-if not app.config['SQLALCHEMY_DATABASE_URI']:
-    DATABASE_PATH = './database/aconselhamento.db'
-    os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
-    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{DATABASE_PATH}'
+# Banco de dados – prioriza PostgreSQL, fallback para SQLite
+DATABASE_URL = os.getenv('DATABASE_URL')
+if DATABASE_URL:
+    if DATABASE_URL.startswith('postgres://'):
+        DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
+    app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
+    logger.info("Usando PostgreSQL: %s", DATABASE_URL)
+else:
+    # Fallback para SQLite (local ou /data se existir)
+    data_dir = '/data' if os.path.exists('/data') else os.getcwd()
+    db_path = os.path.join(data_dir, 'acompanhamento.db')
+    os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
+    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
+    logger.info("Usando SQLite: %s", db_path)
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
-# Pastas para uploads
-UPLOAD_FOLDER = './uploads'
+# Pastas para uploads (logos e anexos) – sempre no diretório atual
+UPLOAD_FOLDER = os.path.join(os.getcwd(), 'uploads')
 LOGO_FOLDER = os.path.join(UPLOAD_FOLDER, 'logos')
+BACKUP_FOLDER = os.path.join(os.getcwd(), 'backups')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(LOGO_FOLDER, exist_ok=True)
+os.makedirs(BACKUP_FOLDER, exist_ok=True)
+
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['LOGO_FOLDER'] = LOGO_FOLDER
+app.config['BACKUP_FOLDER'] = BACKUP_FOLDER
 
 PORT = int(os.getenv('PORT', 5000))
 ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'gif', 'doc', 'docx', 'txt'}
@@ -78,6 +95,10 @@ class Pessoa(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    # Relacionamentos para casais
+    casais_homem = db.relationship('Casal', foreign_keys='Casal.id_homem', backref='homem', lazy=True, cascade='all, delete-orphan')
+    casais_mulher = db.relationship('Casal', foreign_keys='Casal.id_mulher', backref='mulher', lazy=True, cascade='all, delete-orphan')
+
 class Casal(db.Model):
     __tablename__ = 'casais'
     id = db.Column(db.Integer, primary_key=True)
@@ -101,10 +122,10 @@ class Sessao(db.Model):
     id_casal = db.Column(db.Integer, db.ForeignKey('casais.id', ondelete='SET NULL'))
     versiculo = db.Column(db.String(200))
     anotacao_sessao = db.Column(db.Text)
-    tasks = db.Column(db.Text)
-    tarefas_anteriores = db.Column(db.Text)
-    assuntos_nesta = db.Column(db.Text)
-    assuntos_proximas = db.Column(db.Text)
+    tasks = db.Column(db.Text)          # JSON
+    tarefas_anteriores = db.Column(db.Text)  # JSON
+    assuntos_nesta = db.Column(db.Text)      # JSON
+    assuntos_proximas = db.Column(db.Text)   # JSON
     status = db.Column(db.String(20), default='realizada')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -151,21 +172,27 @@ class Configuracao(db.Model):
     valor = db.Column(db.String(200), nullable=False)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-# ===== CRIAÇÃO DAS TABELAS =====
+# ===== CRIAÇÃO DAS TABELAS E CONFIGURAÇÕES PADRÃO =====
 with app.app_context():
-    db.create_all()
-    configs_padrao = {
-        'cor_primaria': '#b58b4b',
-        'cor_secundaria': '#2d6a4f',
-        'cor_fundo': '#f5f1eb',
-        'cor_texto': '#2e2b28',
-        'logo_url': '',
-        'nome_igreja': 'Igreja Batista'
-    }
-    for chave, valor in configs_padrao.items():
-        if not Configuracao.query.filter_by(chave=chave).first():
-            db.session.add(Configuracao(chave=chave, valor=valor))
-    db.session.commit()
+    try:
+        db.create_all()
+        logger.info("Tabelas verificadas/criadas com sucesso.")
+        configs_padrao = {
+            'cor_primaria': '#b58b4b',
+            'cor_secundaria': '#2d6a4f',
+            'cor_fundo': '#f5f1eb',
+            'cor_texto': '#2e2b28',
+            'logo_url': '',
+            'nome_igreja': 'Igreja Batista'
+        }
+        for chave, valor in configs_padrao.items():
+            if not Configuracao.query.filter_by(chave=chave).first():
+                db.session.add(Configuracao(chave=chave, valor=valor))
+        db.session.commit()
+        logger.info("Configurações padrão inseridas.")
+    except Exception as e:
+        logger.error("Erro ao inicializar banco: %s", e)
+        raise
 
 # ===== SERVE FRONTEND =====
 @app.route('/')
@@ -175,6 +202,22 @@ def serve_index():
 @app.route('/<path:path>')
 def serve_static(path):
     return send_from_directory('frontend', path)
+
+# Rota para servir arquivos de upload (logos e anexos)
+@app.route('/uploads/<path:filename>')
+def serve_upload(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename)
+
+# ===== BACKUP AUTOMÁTICO (desabilitado para evitar erros no Render) =====
+# O backup automático não é crítico e pode ser removido para evitar problemas com o scheduler.
+# Se quiser manter, descomente as linhas abaixo.
+
+# def fazer_backup():
+#     # Implementação de backup (exemplo com SQLite)
+#     pass
+# scheduler = BackgroundScheduler()
+# scheduler.add_job(fazer_backup, trigger=IntervalTrigger(days=1), next_run_time=datetime.now() + timedelta(hours=1))
+# scheduler.start()
 
 # ===== AUTENTICAÇÃO =====
 def gerar_token(conselheiro_id, refresh=False):
@@ -322,18 +365,14 @@ def upload_logo():
     if not allowed_image(file.filename):
         return jsonify({'erro': 'Formato de imagem não permitido (use PNG, JPG, JPEG, GIF ou WEBP)'}), 400
 
-    # Gerar nome único
     ext = file.filename.rsplit('.', 1)[1].lower()
     nome_arquivo = f"logo_{secrets.token_hex(8)}.{ext}"
     caminho = os.path.join(app.config['LOGO_FOLDER'], nome_arquivo)
     file.save(caminho)
 
-    # URL pública (relativa)
     logo_url = f"/uploads/logos/{nome_arquivo}"
-    # Atualizar configuração
     config = Configuracao.query.get('logo_url')
     if config:
-        # Remover logo antigo se existir
         if config.valor and config.valor.startswith('/uploads/logos/'):
             antigo = os.path.join(app.config['LOGO_FOLDER'], os.path.basename(config.valor))
             if os.path.exists(antigo):
@@ -344,11 +383,6 @@ def upload_logo():
     db.session.commit()
     log_acao(request.user_id, 'upload_logo', f'Logo atualizado: {logo_url}')
     return jsonify({'mensagem': 'Logo enviado com sucesso', 'logo_url': logo_url}), 201
-
-# Rota para servir arquivos de upload (logos e anexos)
-@app.route('/uploads/<path:filename>')
-def serve_upload(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
 
 # ===== CONFIGURAÇÕES =====
 @app.route('/api/configuracoes', methods=['GET'])
@@ -606,7 +640,7 @@ def deletar_sessao(id):
     db.session.commit()
     return jsonify({'deletado': 1})
 
-# ===== ÚLTIMA SESSÃO =====
+# ===== ÚLTIMA SESSÃO (tarefas pendentes) =====
 @app.route('/api/ultima_sessao', methods=['GET'])
 @autenticar_token
 def ultima_sessao():
@@ -779,7 +813,7 @@ def deletar_lembrete(id):
     db.session.commit()
     return jsonify({'deletado': 1})
 
-# ===== ESTATÍSTICAS (CORRIGIDO) =====
+# ===== ESTATÍSTICAS (CORRIGIDO PARA POSTGRESQL E SQLITE) =====
 @app.route('/api/estatisticas', methods=['GET'])
 @autenticar_token
 def estatisticas():
@@ -800,22 +834,27 @@ def estatisticas():
     lembretes_pendentes = Lembrete.query.filter_by(conselheiro_id=request.user_id, concluido=0).count()
 
     # Sessões por mês (últimos 12 meses) – compatível com PostgreSQL e SQLite
-    # Usamos extração de ano e mês
-    from sqlalchemy import extract
-    # Pegamos todas as sessões do usuário
-    sessoes_mes = db.session.query(
-        func.extract('year', func.to_date(Sessao.data, 'YYYY-MM-DD')).label('ano'),
-        func.extract('month', func.to_date(Sessao.data, 'YYYY-MM-DD')).label('mes'),
-        func.count().label('total')
-    ).filter(
-        Sessao.conselheiro_id == request.user_id,
-        Sessao.data >= (datetime.utcnow() - timedelta(days=365)).strftime('%Y-%m-%d')
-    ).group_by('ano', 'mes').order_by('ano', 'mes').all()
-
-    sessoes_por_mes = []
-    for m in sessoes_mes:
-        mes_str = f"{int(m.ano):04d}-{int(m.mes):02d}"
-        sessoes_por_mes.append({'mes': mes_str, 'total': m.total})
+    # Usamos funções SQL compatíveis
+    if 'postgresql' in str(db.engine.url):
+        # PostgreSQL: usar DATE_TRUNC
+        meses = db.session.query(
+            func.date_trunc('month', func.to_date(Sessao.data, 'YYYY-MM-DD')).label('mes'),
+            func.count().label('total')
+        ).filter(
+            Sessao.conselheiro_id == request.user_id,
+            Sessao.data >= (datetime.utcnow() - timedelta(days=365)).strftime('%Y-%m-%d')
+        ).group_by('mes').order_by('mes').all()
+        sessoes_por_mes = [{'mes': m.mes.strftime('%Y-%m') if hasattr(m.mes, 'strftime') else str(m.mes)[:7], 'total': m.total} for m in meses]
+    else:
+        # SQLite: usar strftime
+        meses = db.session.query(
+            func.strftime('%Y-%m', Sessao.data).label('mes'),
+            func.count().label('total')
+        ).filter(
+            Sessao.conselheiro_id == request.user_id,
+            Sessao.data >= (datetime.utcnow() - timedelta(days=365)).strftime('%Y-%m-%d')
+        ).group_by('mes').order_by('mes').all()
+        sessoes_por_mes = [{'mes': m.mes, 'total': m.total} for m in meses]
 
     return jsonify({
         'total_sessoes': total_sessoes,
@@ -951,13 +990,29 @@ def exportar_excel():
     output.seek(0)
     return send_file(output, download_name='sessoes.xlsx', as_attachment=True, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
-# ===== BACKUP MANUAL =====
+# ===== BACKUP MANUAL (adaptado) =====
 @app.route('/api/backup', methods=['GET'])
 @autenticar_token
 def baixar_backup():
-    # No PostgreSQL, podemos exportar dados em JSON ou CSV.
-    # Por simplicidade, retornamos uma mensagem.
-    return jsonify({'mensagem': 'Backup via PostgreSQL gerenciado pelo Render. Use a ferramenta de backup do Render.'}), 200
+    # Com PostgreSQL, o backup é gerenciado pelo Render.
+    # Podemos exportar como JSON ou retornar mensagem.
+    # Vamos retornar um arquivo JSON com os dados principais (exemplo simples)
+    try:
+        # Exportar dados para JSON
+        data = {
+            'conselheiros': [{'id': c.id, 'nome': c.nome} for c in Conselheiro.query.all()],
+            'pessoas': [{'id': p.id, 'nome': p.nome} for p in Pessoa.query.filter_by(conselheiro_id=request.user_id).all()],
+            'sessoes': [{'id': s.id, 'data': s.data, 'caso_num': s.caso_num} for s in Sessao.query.filter_by(conselheiro_id=request.user_id).all()]
+        }
+        json_str = json.dumps(data, indent=2, default=str)
+        return send_file(
+            io.BytesIO(json_str.encode('utf-8')),
+            download_name=f'backup_{datetime.now().strftime("%Y%m%d")}.json',
+            as_attachment=True,
+            mimetype='application/json'
+        )
+    except Exception as e:
+        return jsonify({'erro': f'Erro ao gerar backup: {str(e)}'}), 500
 
 # ===== LOGS =====
 @app.route('/api/logs', methods=['GET'])

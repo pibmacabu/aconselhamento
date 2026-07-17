@@ -371,7 +371,22 @@
         .config-group .field-group { grid-column:auto; }
         .config-group .field-group.full { grid-column:1/-1; }
 
-        .logo-preview { margin-top:0.5rem; max-height:80px; border-radius:8px; }
+        .logo-preview { max-height:80px; border-radius:8px; margin-top:0.5rem; }
+
+        .senha-section {
+            grid-column:1/-1;
+            margin-top:1.5rem;
+            border-top:2px solid var(--border);
+            padding-top:1.5rem;
+        }
+        .senha-section h4 { margin-bottom:0.8rem; }
+        .senha-grid {
+            display:flex;
+            flex-wrap:wrap;
+            gap:0.8rem;
+            align-items:flex-end;
+        }
+        .senha-grid .field-group { flex:1; min-width:150px; }
 
         @media(max-width:700px) {
             .tab-content { padding:1.2rem; }
@@ -388,21 +403,6 @@
         ::-webkit-scrollbar-thumb { background:#c4b5a6; border-radius:10px; }
         .btn-nova-sessao { background:var(--secondary); color:#fff; }
         .btn-nova-sessao:hover { filter:brightness(0.9); }
-
-        .senha-section {
-            grid-column:1/-1;
-            margin-top:1.5rem;
-            border-top:2px solid var(--border);
-            padding-top:1.5rem;
-        }
-        .senha-section h4 { margin-bottom:0.8rem; }
-        .senha-grid {
-            display:flex;
-            flex-wrap:wrap;
-            gap:0.8rem;
-            align-items:flex-end;
-        }
-        .senha-grid .field-group { flex:1; min-width:150px; }
     </style>
 </head>
 <body>
@@ -617,7 +617,7 @@
                 <div class="field-group full"><label>Nome da Igreja</label><input type="text" id="nomeIgreja" value="Igreja Batista" /></div>
                 <div class="field-group full"><label>URL do Logo</label><input type="text" id="logoUrl" placeholder="https://exemplo.com/logo.png" /></div>
 
-                <!-- Upload do Logo -->
+                <!-- UPLOAD DO LOGO -->
                 <div class="field-group full" style="border-top:1px solid var(--border); padding-top:1rem;">
                     <label>📤 Enviar Logo (imagem)</label>
                     <div style="display:flex; gap:0.8rem; flex-wrap:wrap; align-items:center;">
@@ -627,7 +627,7 @@
                     <div id="logoPreviewContainer" style="margin-top:0.5rem;"></div>
                 </div>
 
-                <!-- Alterar Senha -->
+                <!-- ALTERAR SENHA -->
                 <div class="senha-section">
                     <h4>🔐 Alterar Senha</h4>
                     <div class="senha-grid">
@@ -1488,7 +1488,6 @@ function aplicarTema() {
     root.style.setProperty('--bg', b);
     root.style.setProperty('--text', t);
     document.getElementById('appTitle').textContent = logo ? `${nome}` : '🕊️ Aconselhamento Bíblico';
-    // Se houver logo, exibir no cabeçalho (opcional)
 }
 async function salvarConfiguracoes(e) {
     e.preventDefault();
@@ -1618,7 +1617,7 @@ async function downloadBackup() {
         const blob = await resp.blob();
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
-        a.download = `backup_${new Date().toISOString().slice(0,10)}.db`;
+        a.download = `backup_${new Date().toISOString().slice(0,10)}.json`;
         a.click();
         URL.revokeObjectURL(a.href);
         showToast('Backup baixado!', 'success');
